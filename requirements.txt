@@ -10,7 +10,7 @@ flet==0.21.2
 pyserial==3.5
 
 # --- Database ---
-SQLAlchemy==2.0.29
+SQLAlchemy==2.0.55
 
 # --- Configuration ---
 python-dotenv==1.0.1
