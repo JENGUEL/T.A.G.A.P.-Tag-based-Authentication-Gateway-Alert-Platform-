@@ -9,7 +9,7 @@ from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from core.constants import SmsStatus
-from models.base import Base, TimestampMixin
+from models.base import Base, TimestampMixin, _utcnow
 
 if TYPE_CHECKING:
     from models.alert import Alert
@@ -20,7 +20,6 @@ class SmsQueue(Base, TimestampMixin):
 
     alert_id: Mapped[int] = mapped_column(ForeignKey("alerts.id"), nullable=False, index=True)
 
-    # "PARENT" or "POLICE"
     recipient_type: Mapped[str] = mapped_column(String(16), nullable=False)
     phone_number: Mapped[str] = mapped_column(String(20), nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
@@ -31,6 +30,14 @@ class SmsQueue(Base, TimestampMixin):
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     failure_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # --- NEW in Sprint 4: retry scheduling ---
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_utcnow,
+        nullable=False,
+        index=True,
+    )
 
     alert: Mapped["Alert"] = relationship(back_populates="sms_messages")
 

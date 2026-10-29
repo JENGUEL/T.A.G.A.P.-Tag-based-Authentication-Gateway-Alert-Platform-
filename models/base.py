@@ -15,8 +15,8 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 def _utcnow() -> datetime:
-    """Timezone-aware UTC now. Used as default for timestamps."""
-    return datetime.now(timezone.utc)
+    """Naive UTC — for DB column defaults (SQLite strips tz anyway)."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 class Base(DeclarativeBase):
