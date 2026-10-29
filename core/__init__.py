@@ -1,0 +1,1 @@
+"""T.A.G.A.P. core package: config, logging, constants, exceptions."""

@@ -1,0 +1,20 @@
+# ============================================================
+# T.A.G.A.P. - Python Dependencies
+# Pinned versions for reproducibility (production standard)
+# ============================================================
+
+# --- UI ---
+flet==0.21.2
+
+# --- Hardware Communication ---
+pyserial==3.5
+
+# --- Database ---
+SQLAlchemy==2.0.29
+
+# --- Configuration ---
+python-dotenv==1.0.1
+
+# --- Testing ---
+pytest==8.1.1
+pytest-cov==5.0.0
