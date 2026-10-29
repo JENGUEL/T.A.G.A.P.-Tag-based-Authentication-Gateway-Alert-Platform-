@@ -8,11 +8,12 @@ from __future__ import annotations
 import time
 from datetime import datetime, timezone
 
-from core.constants import CardType, SmsStatus
+from core.constants import CardType, SmsStatus          # ← CardType here
 from data.database import drop_db, get_db, init_db
 from data.repositories import SmsQueueRepository
 from data.seed import seed
 from models import Alert, Analytics, AuditLog, SmsQueue
+from models.sms_result_dto import AlertOutcome, AlertResult   # ← AlertOutcome here
 from services import get_sms_service, reset_services
 from services.adapters.sms_mock import MockSmsService
 from services.alert_service import AlertService
@@ -194,8 +195,33 @@ def main() -> None:
     sms_svc.close()
     reset_services()
 
+    from data.queries import get_dashboard_data, get_alert_history_stats
+    from services.export_service import export_analytics_csv
+
+    dashboard = get_dashboard_data()
+    assert dashboard["room_name"] == "Room 201"
+    print("✅ Sprint 4.5: Dashboard query works")
+
+    stats = get_alert_history_stats()
+    assert stats["total_sms"] > 0
+    print(f"✅ Sprint 4.5: Analytics query works (Delivery Rate: {stats['delivery_rate']}%)")
+
+    csv_path = export_analytics_csv()
+    assert csv_path.exists()
+    print(f"✅ Sprint 4.5: CSV export works ({csv_path.name})")
+
+    # --- 15. Sprint 4.5: Manual trigger 2FA ---
+    bad_admin = AlertService.confirm_manual_alert(CardType.DANGER, "CARD-SAFE-0001")
+    assert bad_admin.outcome == AlertOutcome.ERROR
+    print("✅ Sprint 4.5: Manual trigger rejected without admin card")
+
+    good_manual = AlertService.confirm_manual_alert(CardType.DANGER, "CARD-ADMIN-0001")
+    assert good_manual.alert_id is not None
+    assert good_manual.sms_queued == 4
+    print(f"✅ Sprint 4.5: Manual trigger with admin card → {good_manual.sms_queued} SMS")
+
     print("=" * 60)
-    print("✅ ALL SPRINT 4 CHECKS PASSED")
+    print("✅ ALL SPRINT 4 & 4.5 CHECKS PASSED")
     print("=" * 60)
 
 
