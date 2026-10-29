@@ -91,3 +91,82 @@ def get_rfid_history(limit: int = 10) -> list[dict]:
                 "meaning": alert.card_type.title(),
             })
         return results
+
+
+
+def get_room_info(room_id: int) -> dict[str, Any]:
+    """Full info about a room for the Dashboard header."""
+    with get_db() as db:
+        room = db.query(Room).filter_by(id=room_id).first()
+        if not room:
+            return {}
+        return {
+            "room_id": room.id,
+            "room_name": room.name,
+            "wing": room.wing,
+            "floor": room.floor,
+            "school_name": room.school.name,
+            "school_hotline": room.school.hotline,
+            "grade_section": "Grade 7 - Section A",  # Placeholder until we add to DB
+        }
+
+
+def get_parents_for_room(room_id: int) -> list[dict]:
+    """List of parents linked to a room (for Quick Actions)."""
+    with get_db() as db:
+        from models import Parent, Student
+        parents = (
+            db.query(Parent)
+            .join(Parent.students)
+            .filter(Student.room_id == room_id)
+            .distinct()
+            .all()
+        )
+        return [
+            {"id": p.id, "name": p.name, "phone": p.phone_number}
+            for p in parents
+        ]
+
+
+def get_settings_snapshot(room_id: int) -> dict[str, Any]:
+    """All settings data for the Settings page."""
+    from config import settings
+    from models import SmsTemplate, Card
+
+    with get_db() as db:
+        cards = db.query(Card).filter_by(room_id=room_id).all()
+        templates = db.query(SmsTemplate).all()
+
+        return {
+            "system_name": settings.APP_NAME,
+            "room_id": f"TAGAP-RD-{room_id:03d}",
+            "dedup_window": settings.DEDUPLICATION_WINDOW_SECONDS,
+            "confirmation_timeout": settings.CONFIRMATION_TIMEOUT_SECONDS,
+            "sms_retry_attempts": settings.SMS_RETRY_ATTEMPTS,
+            "mock_rfid": settings.USE_MOCK_RFID,
+            "mock_sms": settings.USE_MOCK_SMS,
+            "cards": [
+                {"uid": c.uid, "type": c.type, "active": c.active}
+                for c in cards
+            ],
+            "templates": [
+                {
+                    "id": t.id,
+                    "card_type": t.card_type,
+                    "recipient_type": t.recipient_type,
+                    "text": t.template_text,
+                }
+                for t in templates
+            ],
+        }
+
+
+def get_queue_stats(room_id: int | None = None) -> dict[str, int]:
+    """Pending / sent / failed SMS counts."""
+    with get_db() as db:
+        base = db.query(SmsQueue)
+        return {
+            "pending": base.filter_by(status="PENDING").count(),
+            "sent": base.filter_by(status="SENT").count(),
+            "failed": base.filter_by(status="FAILED").count(),
+        }
