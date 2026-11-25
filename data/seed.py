@@ -41,10 +41,13 @@ def seed() -> None:
         # --- School ---
         school = db.query(School).first()
         if not school:
-            school = School(name="San Jose National High School", hotline="0917-000-0000")
+            school = School(name="St. Mary's Academy of Palo, Leyte, Inc.", hotline="0917-000-0000")
             db.add(school)
             db.flush()
             logger.info("Seeded school: %s", school.name)
+        elif school.name != "St. Mary's Academy of Palo, Leyte, Inc.":
+            school.name = "St. Mary's Academy of Palo, Leyte, Inc."
+            logger.info("Updated school name: %s", school.name)
 
         # --- Police station ---
         if not db.query(PoliceStation).first():

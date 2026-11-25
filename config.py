@@ -51,7 +51,7 @@ def _get_str(key: str, default: str) -> str:
     return raw if raw is not None else default
 
 
-@dataclass(frozen=True)
+@dataclass
 class Settings:
     """Immutable application settings."""
 

@@ -24,13 +24,13 @@ def animated_title() -> tuple[ft.Row, list[tuple[ft.Container, ft.Text]]]:
     letters = []
     cells = []
     for character in "T.A.G.A.P.":
-        base = ft.Text(character, size=30, weight=ft.FontWeight.BOLD, color=INK)
+        base = ft.Text(character, size=40, weight=ft.FontWeight.BOLD, color=INK)
         shine = ft.Text(
-            character, size=30, weight=ft.FontWeight.BOLD, color=COLOR_START, opacity=0,
+            character, size=40, weight=ft.FontWeight.BOLD, color=COLOR_START, opacity=0,
             animate_opacity=ft.Animation(duration=200, curve=ft.AnimationCurve.EASE_IN_OUT),
         )
         cell = ft.Container(
-            width=11 if character == "." else 24, height=48, alignment=ft.Alignment.CENTER,
+            width=12 if character == "." else 30, height=58, alignment=ft.Alignment.CENTER,
             opacity=0, scale=0.3,
             animate_opacity=ft.Animation(duration=280, curve=ft.AnimationCurve.EASE_OUT),
             animate_scale=ft.Animation(duration=360, curve=ft.AnimationCurve.EASE_OUT_BACK),
@@ -45,27 +45,73 @@ async def run_boot_sequence(page: ft.Page):
     """Animates splash, runs checks, and routes to next screen."""
     title, title_cells = animated_title()
     progress = ft.ProgressBar(
-        width=144, value=0, color=COLOR_END, bgcolor="#E5E0E2", bar_height=3, border_radius=3,
+        width=260, value=0, color=COLOR_END, bgcolor="#E8DEE1",
+        bar_height=4, border_radius=4,
     )
-    status_text = ft.Text("Initializing secure gateway...", size=9, color=MUTED)
+    status_text = ft.Text("Initializing secure gateway...", size=11, color=MUTED,
+                          weight=ft.FontWeight.W_600)
+
+    shield_glow = ft.Container(
+        width=118, height=118, bgcolor="#F1DCE1",
+        border_radius=59, border=ft.Border.all(1, "#E8C8CF"),
+        alignment=ft.Alignment.CENTER,
+        animate_scale=ft.Animation(duration=900, curve=ft.AnimationCurve.EASE_IN_OUT),
+        scale=0.94,
+        content=ft.Container(
+            width=82, height=82, alignment=ft.Alignment.CENTER,
+            bgcolor=COLOR_END, border_radius=24,
+            shadow=ft.BoxShadow(blur_radius=30, spread_radius=2, color="#55AE3044"),
+            content=ft.Icon(ft.Icons.VERIFIED_USER, size=48, color=ft.Colors.WHITE),
+        ),
+    )
 
     # Build Splash UI
     page.add(
         ft.SafeArea(
             expand=True,
             content=ft.Container(
-                expand=True, alignment=ft.Alignment.CENTER, bgcolor="#F7F6F5",
+                expand=True,
+                alignment=ft.Alignment.CENTER,
+                gradient=ft.RadialGradient(
+                    center=ft.Alignment.CENTER,
+                    radius=1.2,
+                    colors=["#FFFFFF", "#FAF6F7", "#F2E7EA"],
+                ),
                 content=ft.Column(
-                    tight=True, horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=10,
+                    tight=True,
+                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                    spacing=12,
                     controls=[
-                        ft.Container(width=44, height=48, alignment=ft.Alignment.CENTER, bgcolor=COLOR_END,
-                                     border_radius=12,
-                                     content=ft.Icon(ft.Icons.VERIFIED_USER, size=25, color=ft.Colors.WHITE)),
+                        shield_glow,
                         title,
-                        ft.Text("Tag-based Authentication Gateway Alert Platform", size=10, color=MUTED),
-                        ft.Container(height=8),
+                        ft.Text(
+                            "TAG-BASED AUTHENTICATION GATEWAY",
+                            size=12,
+                            color=INK,
+                            weight=ft.FontWeight.BOLD,
+                        ),
+                        ft.Text(
+                            "Emergency Alert Platform",
+                            size=15,
+                            color=COLOR_END,
+                            weight=ft.FontWeight.W_600,
+                        ),
+                        ft.Container(height=10),
                         progress,
                         status_text,
+                        ft.Container(height=8),
+                        ft.Container(
+                            padding=ft.Padding.symmetric(horizontal=18, vertical=9),
+                            bgcolor="#FFFFFF",
+                            border=ft.Border.all(1, "#E9DFE2"),
+                            border_radius=30,
+                            content=ft.Text(
+                                "St. Mary's Academy of Palo, Leyte, Inc.",
+                                size=11,
+                                color=MUTED,
+                                weight=ft.FontWeight.BOLD,
+                            ),
+                        ),
                     ],
                 ),
             ),
@@ -73,14 +119,31 @@ async def run_boot_sequence(page: ft.Page):
     )
 
     # 1. Animate Title
+    async def pulse_shield():
+        while True:
+            shield_glow.scale = 1.08
+            try:
+                shield_glow.update()
+            except RuntimeError:
+                return
+            await asyncio.sleep(0.9)
+            shield_glow.scale = 0.94
+            try:
+                shield_glow.update()
+            except RuntimeError:
+                return
+            await asyncio.sleep(0.9)
+
+    shield_animation = page.run_task(pulse_shield)
+
     for cell, _ in title_cells:
         cell.opacity = 1
         cell.scale = 1.0
         page.update()
-        await asyncio.sleep(0.075)
+        await asyncio.sleep(0.055)
 
     # 2. Animate Progress and RUN CHECKS
-    total_steps = 20
+    total_steps = 24
     previous_index = None
     errors = []
 
@@ -97,15 +160,22 @@ async def run_boot_sequence(page: ft.Page):
         progress.value = (step + 1) / total_steps
 
         # Trigger the health check on step 5
-        if step == 5:
-            status_text.value = "Running diagnostics..."
+        if step == 4:
+            status_text.value = "Checking database integrity..."
             page.update()
-            # Run in background thread so UI doesn't freeze
+        elif step == 10:
+            status_text.value = "Repairing missing records and directories..."
+            page.update()
+        elif step == 16:
+            status_text.value = "Verifying RFID, GSM, and application source..."
+            page.update()
+
+        if step == 6:
             errors = await asyncio.to_thread(run_preflight_checks)
 
         page.update()
         previous_index = current_index
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.085)
 
     # 3. Finish and Route
     progress.value = 1
@@ -113,16 +183,50 @@ async def run_boot_sequence(page: ft.Page):
     await asyncio.sleep(0.3)
 
     if errors:
-        # Show Error Toast and stay on splash
         status_text.value = "Boot failed. Please contact admin."
         status_text.color = "red"
         page.update()
-        for err in errors:
-            page.overlay.append(ft.SnackBar(ft.Text(f"❌ {err}", color="white"), bgcolor="red", open=True))
-            page.update()
-            await asyncio.sleep(1.5)  # Give user time to read the error
+        def continue_with_warning(_):
+            page.pop_dialog()
+            shield_animation.cancel()
+            page.clean()
+            AppRouter(page)
+
+        error_controls = [
+            ft.Container(
+                padding=10,
+                bgcolor="#FDEBEC",
+                border_radius=10,
+                content=ft.Text(f"• {error}", size=12, color=COLOR_END),
+            )
+            for error in errors
+        ]
+        dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Row(tight=True, spacing=8, controls=[
+                ft.Icon(ft.Icons.ERROR_OUTLINE, color=COLOR_END),
+                ft.Text("System needs attention", size=18, weight=ft.FontWeight.BOLD),
+            ]),
+            content=ft.Container(
+                width=520,
+                content=ft.Column(tight=True, spacing=8, controls=[
+                    ft.Text(
+                        "T.A.G.A.P. could not automatically resolve these issues:",
+                        size=12,
+                        color=MUTED,
+                    ),
+                    *error_controls,
+                ]),
+            ),
+            actions=[
+                ft.TextButton(content="Exit kiosk", on_click=lambda _: page.window.close()),
+                ft.TextButton(content="Continue anyway", on_click=continue_with_warning),
+            ],
+        )
+        page.show_dialog(dialog)
     else:
         # Success! Load the Kiosk
+        shield_animation.cancel()
         page.clean()
         AppRouter(page)
 
