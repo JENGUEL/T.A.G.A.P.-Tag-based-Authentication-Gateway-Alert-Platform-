@@ -233,7 +233,6 @@ def get_operational_report_data(
             "name": room.name,
             "room_number": room.room_number,
             "section": room.section,
-            "wing": room.wing,
             "floor": room.floor,
             "school": room.school.name,
         }

@@ -30,7 +30,7 @@ class AlertResult:
 
     outcome: AlertOutcome
     card_uid: str = ""
-    card_type: CardType | None = None
+    card_type: CardType | str | None = None
     room_id: int | None = None
     room_name: str = ""
     wing: str = ""

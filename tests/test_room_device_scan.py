@@ -3,7 +3,18 @@ import pytest
 from ui import router as router_module
 
 
-def test_room_device_admin_scan_updates_live_status_without_alerting(monkeypatch):
+@pytest.fixture
+def beep_calls(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        router_module.AudioService, "beep", lambda: calls.append("beep")
+    )
+    return calls
+
+
+def test_room_device_admin_scan_updates_live_status_without_alerting(
+    monkeypatch, beep_calls
+):
     router = object.__new__(router_module.AppRouter)
     router.current_alert = None
     router.room_id = 1
@@ -22,9 +33,10 @@ def test_room_device_admin_scan_updates_live_status_without_alerting(monkeypatch
     router.handle_card_scan("A1B2C3D4")
 
     assert received_uids == ["A1B2C3D4"]
+    assert beep_calls == ["beep"]
 
 
-def test_admin_scans_outside_room_device_are_not_processed(monkeypatch):
+def test_admin_scans_outside_room_device_are_not_processed(monkeypatch, beep_calls):
     router = object.__new__(router_module.AppRouter)
     router.current_alert = None
     router.room_id = 1
@@ -42,3 +54,13 @@ def test_admin_scans_outside_room_device_are_not_processed(monkeypatch):
     )
 
     router.handle_card_scan("A1B2C3D4")
+    assert beep_calls == ["beep"]
+
+
+def test_card_scan_beeps_even_when_an_alert_is_already_open(monkeypatch, beep_calls):
+    router = object.__new__(router_module.AppRouter)
+    router.current_alert = object()
+
+    router.handle_card_scan("A1B2C3D4")
+
+    assert beep_calls == ["beep"]

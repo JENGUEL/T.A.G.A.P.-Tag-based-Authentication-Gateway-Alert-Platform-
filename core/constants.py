@@ -11,12 +11,17 @@ from enum import Enum
 
 
 class CardType(str, Enum):
-    """The 4 card types in the T.A.G.A.P. system."""
+    """Built-in RFID card types; alert categories may also be user-defined."""
 
     SAFE = "SAFE"
     ASSIST = "ASSIST"
     DANGER = "DANGER"
     ADMIN = "ADMIN"
+
+
+def card_type_value(card_type: CardType | str) -> str:
+    """Return a stable string for built-in enum values and custom categories."""
+    return card_type.value if isinstance(card_type, CardType) else str(card_type)
 
 
 class AlertStatus(str, Enum):

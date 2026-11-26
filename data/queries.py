@@ -12,7 +12,7 @@ from typing import Any
 from sqlalchemy import func
 from data.database import get_db
 from core.time_utils import utc_now
-from models import Alert, SmsQueue, Analytics, Room, School, Card
+from models import Alert, SmsQueue, Analytics, Room, School, Card, CardCategory
 
 
 def get_dashboard_data() -> dict[str, Any]:
@@ -143,7 +143,18 @@ def get_settings_snapshot(room_id: int) -> dict[str, Any]:
 
     with get_db() as db:
         cards = db.query(Card).filter_by(room_id=room_id).all()
-        templates = db.query(SmsTemplate).all()
+        categories = (
+            db.query(CardCategory.name)
+            .filter_by(active=True)
+            .order_by(CardCategory.name)
+            .all()
+        )
+        category_names = [category_name for (category_name,) in categories]
+        templates = (
+            db.query(SmsTemplate)
+            .filter(SmsTemplate.card_type.in_(category_names))
+            .all()
+        )
 
         return {
             "system_name": settings.APP_NAME,
@@ -151,6 +162,7 @@ def get_settings_snapshot(room_id: int) -> dict[str, Any]:
             "dedup_window": settings.DEDUPLICATION_WINDOW_SECONDS,
             "confirmation_timeout": settings.CONFIRMATION_TIMEOUT_SECONDS,
             "sms_retry_attempts": settings.SMS_RETRY_ATTEMPTS,
+            "categories": category_names,
             "mock_rfid": settings.USE_MOCK_RFID,
             "mock_sms": settings.USE_MOCK_SMS,
             "cards": [

@@ -31,6 +31,7 @@ from core.constants import (
     EVENT_CARD_REJECTED_DUPLICATE,
     EVENT_CARD_SCANNED,
     CardType,
+    card_type_value,
 )
 from core.time_utils import utc_now
 from data.database import get_db
@@ -52,7 +53,7 @@ logger = logging.getLogger(__name__)
 
 _SMS_TEMPLATE_SAMPLE_CONTEXT = {
     "room_name": "Room 201",
-    "wing": "North Wing",
+    "wing": "",
     "floor": "2nd Floor",
     "school_name": "Sample School",
     "school_hotline": "000",
@@ -128,6 +129,7 @@ class AlertService:
             )
 
         card_type = card.card_type
+        type_name = card_type_value(card_type)
         room: Room = card.room
         school = room.school
 
@@ -170,7 +172,7 @@ class AlertService:
                 {
                     "uid": uid,
                     "room_id": room.id,
-                    "card_type": card_type.value,
+                    "card_type": type_name,
                     "scan_id": scan_id,
                 },
             )
@@ -190,11 +192,11 @@ class AlertService:
                 "uid": uid,
                 "result": "needs_confirmation",
                 "room_id": room.id,
-                "card_type": card_type.value,
+                "card_type": type_name,
                 "scan_id": scan_id,
             },
         )
-        logger.info("Card %s (%s) → needs confirmation", uid, card_type.value)
+        logger.info("Card %s (%s) → needs confirmation", uid, type_name)
         return AlertResult(
             outcome=AlertOutcome.NEEDS_CONFIRMATION,
             card_uid=uid,
@@ -245,6 +247,7 @@ class AlertService:
             )
 
         card_type = card.card_type
+        type_name = card_type_value(card_type)
         room = card.room
         school = room.school
 
@@ -278,13 +281,13 @@ class AlertService:
                 police_tpl = SmsTemplateRepository.get(db, card_type, "POLICE")
 
                 if parent_tpl is None:
-                    raise RuntimeError(f"Missing PARENT template for {card_type.value}")
+                    raise RuntimeError(f"Missing PARENT template for {type_name}")
                 if police_tpl is None:
-                    raise RuntimeError(f"Missing POLICE template for {card_type.value}")
+                    raise RuntimeError(f"Missing POLICE template for {type_name}")
 
                 context = {
                     "room_name": room.name,
-                    "wing": room.wing,
+                    "wing": "",
                     "floor": room.floor,
                     "school_name": school.name,
                     "school_hotline": school.hotline,
@@ -330,7 +333,7 @@ class AlertService:
                         "alert_id": alert.id,
                         "room_id": room.id,
                         "card_uid": uid,
-                        "card_type": card_type.value,
+                        "card_type": type_name,
                         "scan_id": scan_id,
                         "parents": len(parents),
                         "police": len(police_stations),
@@ -342,7 +345,7 @@ class AlertService:
 
             logger.info(
                 "Alert executed: id=%s uid=%s type=%s sms_queued=%d",
-                alert_id, uid, card_type.value, queued,
+                alert_id, uid, type_name, queued,
             )
             return AlertResult(
                 outcome=AlertOutcome.NEEDS_CONFIRMATION,
@@ -389,7 +392,10 @@ class AlertService:
                 scan_ts=utc_now(),
             )
 
-        logger.info("Manual alert initiated, waiting for admin card: %s", card_type.value)
+        logger.info(
+            "Manual alert initiated, waiting for admin card: %s",
+            card_type_value(card_type),
+        )
         return AlertResult(
             outcome=AlertOutcome.NEEDS_CONFIRMATION,
             card_type=card_type,
@@ -428,7 +434,7 @@ class AlertService:
             with get_db() as db:
                 alert = AlertRepository.create(
                     db,
-                    card_uid=f"MANUAL-{card_type.value}",
+                    card_uid=f"MANUAL-{card_type_value(card_type)}",
                     card_type=card_type,
                     room_id=room.id,
                     triggered_at=scan_ts,
@@ -446,7 +452,7 @@ class AlertService:
 
                 context = {
                     "room_name": room.name,
-                    "wing": room.wing,
+                    "wing": "",
                     "floor": room.floor,
                     "school_name": room.school.name,
                     "school_hotline": room.school.hotline,
@@ -490,7 +496,7 @@ class AlertService:
                         "room_id": room.id,
                         "source": "MANUAL",
                         "admin_uid": admin_uid,
-                        "card_type": card_type.value,
+                        "card_type": card_type_value(card_type),
                         "sms_queued": queued,
                     }),
                 )
@@ -499,11 +505,11 @@ class AlertService:
 
             logger.info(
                 "Manual alert executed: id=%s type=%s admin=%s queued=%d",
-                alert_id, card_type.value, admin_uid, queued,
+                alert_id, card_type_value(card_type), admin_uid, queued,
             )
             return AlertResult(
                 outcome=AlertOutcome.NEEDS_CONFIRMATION,
-                card_uid=f"MANUAL-{card_type.value}",
+                card_uid=f"MANUAL-{card_type_value(card_type)}",
                 card_type=card_type,
                 room_id=room.id,
                 room_name=room.name,
@@ -530,7 +536,7 @@ class AlertService:
 
     @staticmethod
     def update_sms_template(
-        card_type: CardType, recipient_type: str, new_text: str
+        card_type: CardType | str, recipient_type: str, new_text: str
     ) -> bool:
         """
         Admin function to update an SMS template.
@@ -540,7 +546,11 @@ class AlertService:
             validate_sms_template(new_text)
             with get_db() as db:
                 SmsTemplateRepository.upsert(db, card_type, recipient_type, new_text)
-            logger.info("Template updated: %s/%s", card_type.value, recipient_type)
+            logger.info(
+                "Template updated: %s/%s",
+                card_type_value(card_type),
+                recipient_type,
+            )
             return True
         except Exception:
             logger.exception("Failed to update template")

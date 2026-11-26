@@ -19,7 +19,7 @@ class Alert(Base, TimestampMixin):
     __tablename__ = "alerts"
 
     card_uid: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    card_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    card_type: Mapped[str] = mapped_column(String(32), nullable=False)
     room_id: Mapped[int] = mapped_column(ForeignKey("rooms.id"), nullable=False, index=True)
 
     triggered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

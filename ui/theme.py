@@ -28,13 +28,23 @@ COLOR_DANGER = PRIMARY_RED
 COLOR_ADMIN = INK
 
 def get_card_color(card_type: str) -> str:
-    if card_type == "SAFE": return COLOR_SAFE
-    if card_type == "ASSIST": return COLOR_ASSIST
-    if card_type == "DANGER": return COLOR_DANGER
-    return COLOR_ADMIN
+    if card_type == "SAFE":
+        return COLOR_SAFE
+    if card_type == "ASSIST":
+        return COLOR_ASSIST
+    if card_type == "DANGER":
+        return COLOR_DANGER
+    if card_type == "ADMIN":
+        return COLOR_ADMIN
+    return "#3976D8"
 
 def get_card_icon(card_type: str) -> str:
-    if card_type == "SAFE": return ft.Icons.SHIELD_OUTLINED
-    if card_type == "ASSIST": return ft.Icons.MEDICAL_SERVICES_OUTLINED
-    if card_type == "DANGER": return ft.Icons.WARNING_AMBER_ROUNDED
-    return ft.Icons.ADMIN_PANEL_SETTINGS
+    if card_type == "SAFE":
+        return ft.Icons.SHIELD_OUTLINED
+    if card_type == "ASSIST":
+        return ft.Icons.MEDICAL_SERVICES_OUTLINED
+    if card_type == "DANGER":
+        return ft.Icons.WARNING_AMBER_ROUNDED
+    if card_type == "ADMIN":
+        return ft.Icons.ADMIN_PANEL_SETTINGS
+    return ft.Icons.CONTACTLESS

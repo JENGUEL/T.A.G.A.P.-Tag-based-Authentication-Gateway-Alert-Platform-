@@ -111,6 +111,9 @@ def init_db() -> None:
 
     Base.metadata.create_all(bind=engine)
     _ensure_room_schema(engine)
+    from data.repositories import OperationalSettingsRepository
+
+    OperationalSettingsRepository.load_into_runtime()
     logger.info("Database schema initialized at %s", settings.db_path)
 
 

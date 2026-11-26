@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 import models
 from core.constants import CardType
 from data import repositories
-from models import Card, Parent, Room, School, Student
+from models import Card, CardCategory, Parent, Room, School, Student, SmsTemplate
 
 
 def _repository_db(monkeypatch):
@@ -162,4 +162,61 @@ def test_card_registration_and_activation_control_reader_admin_access(monkeypatc
         saved = session.scalar(select(Card).where(Card.uid == "A1B2C3D4"))
         assert saved is not None
         assert saved.active is False
+    database_engine.dispose()
+
+
+def test_custom_card_categories_route_cards_and_can_be_deactivated(monkeypatch):
+    database_engine, (room_id, _) = _repository_db(monkeypatch)
+
+    category_name = repositories.CardCategoryRepository.create("Fire Drill")
+    repositories.CardRepository.register(room_id, "F1RE1234", category_name)
+    card = repositories.CardRepository.get_for_room(room_id)[0]
+    assert category_name == "FIRE DRILL"
+    assert card["type"] == "FIRE DRILL"
+    assert category_name in repositories.CardCategoryRepository.get_active()
+    with Session(database_engine) as session:
+        stored_card = session.scalar(select(Card).where(Card.uid == "F1RE1234"))
+        assert stored_card.card_type == "FIRE DRILL"
+
+    repositories.CardCategoryRepository.deactivate(category_name)
+
+    assert category_name not in repositories.CardCategoryRepository.get_active()
+    assert repositories.CardRepository.get_for_room(room_id)[0]["active"] is False
+    with Session(database_engine) as session:
+        stored_category = session.get(CardCategory, category_name)
+        assert stored_category.active is False
+        assert session.scalar(
+            select(SmsTemplate.id).where(SmsTemplate.card_type == category_name)
+        ) is None
+    database_engine.dispose()
+
+
+def test_operational_settings_are_validated_and_persisted(monkeypatch):
+    database_engine, _ = _repository_db(monkeypatch)
+    from config import settings
+
+    monkeypatch.setattr(settings, "DEDUPLICATION_WINDOW_SECONDS", 60)
+    monkeypatch.setattr(settings, "CONFIRMATION_TIMEOUT_SECONDS", 3)
+    monkeypatch.setattr(settings, "SMS_RETRY_ATTEMPTS", 3)
+
+    values = {
+        "dedup_window": 90,
+        "confirmation_timeout": 15,
+        "sms_retry_attempts": 5,
+    }
+    repositories.OperationalSettingsRepository.save(values)
+    assert settings.DEDUPLICATION_WINDOW_SECONDS == 90
+    assert settings.CONFIRMATION_TIMEOUT_SECONDS == 15
+    assert settings.SMS_RETRY_ATTEMPTS == 5
+
+    monkeypatch.setattr(settings, "DEDUPLICATION_WINDOW_SECONDS", 60)
+    monkeypatch.setattr(settings, "CONFIRMATION_TIMEOUT_SECONDS", 3)
+    monkeypatch.setattr(settings, "SMS_RETRY_ATTEMPTS", 3)
+    repositories.OperationalSettingsRepository.load_into_runtime()
+    assert settings.DEDUPLICATION_WINDOW_SECONDS == 90
+    assert settings.CONFIRMATION_TIMEOUT_SECONDS == 15
+    assert settings.SMS_RETRY_ATTEMPTS == 5
+
+    with pytest.raises(ValueError, match="between 1 and 10"):
+        repositories.OperationalSettingsRepository.save({"sms_retry_attempts": 11})
     database_engine.dispose()

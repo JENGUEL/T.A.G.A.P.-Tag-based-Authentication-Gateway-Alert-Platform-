@@ -19,14 +19,16 @@ from core.constants import (
     EVENT_DEVICE_CONNECTION_CHANGED,
     EVENT_RFID_SCAN_DETECTED,
     CardType,
+    card_type_value,
 )
 from models.sms_result_dto import AlertResult, AlertOutcome
 from services.alert_service import AlertService
+from services.audio_service import AudioService
 from services.rfid_listener import RfidListener
 from services.sms_worker import SmsWorker
 from services import get_rfid_service, get_sms_service, reset_services
 from config import settings
-from data.repositories import CardRepository
+from data.repositories import CardCategoryRepository, CardRepository
 from services.boot_service import get_system_status, run_preflight_checks
 from ui.screens.standby import build_standby_screen
 from ui.screens.confirmation import build_confirmation_screen
@@ -173,6 +175,11 @@ class AppRouter:
             self.reader_connected,
             self._register_mode_controls,
             sms_connected=self.sms_connected,
+            developer_cards=[
+                {"type": str(card["type"]), "uid": str(card["uid"])}
+                for card in CardRepository.get_for_room(self.room_id or 1)
+                if bool(card["active"])
+            ],
         )
         self.page.views.append(view)
         self.page.update()
@@ -1719,6 +1726,7 @@ class AppRouter:
         self.page.show_dialog(dialog)
 
     def handle_card_scan(self, uid: str):
+        AudioService.beep()
         if self.current_alert is not None:
             return
         scan_id = uuid4().hex
@@ -1734,6 +1742,7 @@ class AppRouter:
             try:
                 is_admin = CardRepository.is_active_admin_uid(self.room_id or 1, uid)
             except Exception:
+                AudioService.error()
                 logger.exception("Could not verify scanned admin card")
                 if self.reader_monitor_auth_status is not None:
                     self.reader_monitor_auth_status.value = (
@@ -1749,12 +1758,14 @@ class AppRouter:
                 self.admin_authorized = True
                 self.page.pop_dialog()
                 self.show_admin("Reader Monitor")
-            elif self.reader_monitor_auth_status is not None:
-                self.reader_monitor_auth_status.value = (
-                    "That card is not an active admin card. Scan an authorized admin card."
-                )
-                self.reader_monitor_auth_status.color = PRIMARY_RED
-                self.page.update()
+            else:
+                AudioService.error()
+                if self.reader_monitor_auth_status is not None:
+                    self.reader_monitor_auth_status.value = (
+                        "That card is not an active admin card. Scan an authorized admin card."
+                    )
+                    self.reader_monitor_auth_status.color = PRIMARY_RED
+                    self.page.update()
             return
 
         if self.card_registration_session is not None:
@@ -1789,8 +1800,10 @@ class AppRouter:
             self.admin_authorized = True
             self.show_admin("Room Device")
         elif result.outcome == AlertOutcome.REJECTED_DUPLICATE:
+            AudioService.error()
             Toast.show(self.page, "Card already scanned. Please wait.", "warning")
         else:
+            AudioService.error()
             Toast.show(self.page, f"Unknown card: {uid}", "error")
 
     def show_confirmation(self, result: AlertResult):
@@ -1803,7 +1816,7 @@ class AppRouter:
                 EVENT_ALERT_CONFIRMED,
                 {
                     "room_id": result.room_id,
-                    "card_type": result.card_type.value if result.card_type else "",
+                    "card_type": card_type_value(result.card_type) if result.card_type else "",
                     "scan_id": result.scan_id,
                 },
             )
@@ -1815,7 +1828,12 @@ class AppRouter:
             if exec_result.outcome == AlertOutcome.ERROR:
                 Toast.show(self.page, f"Error: {exec_result.error_message}", "error")
             else:
-                Toast.show(self.page, f"{result.card_type.value} Sent to {exec_result.sms_queued} recipients!", "success")
+                Toast.show(
+                    self.page,
+                    f"{card_type_value(result.card_type or 'ALERT')} sent to "
+                    f"{exec_result.sms_queued} recipients!",
+                    "success",
+                )
             self.current_alert = None
             self.rfid_listener.start()
             self.show_standby()
@@ -1825,7 +1843,7 @@ class AppRouter:
                 EVENT_ALERT_CANCELLED,
                 {
                     "room_id": result.room_id,
-                    "card_type": result.card_type.value if result.card_type else "",
+                    "card_type": card_type_value(result.card_type) if result.card_type else "",
                     "scan_id": result.scan_id,
                 },
             )
@@ -1841,7 +1859,7 @@ class AppRouter:
                 EVENT_CONFIRMATION_TIMEOUT,
                 {
                     "room_id": result.room_id,
-                    "card_type": result.card_type.value if result.card_type else "",
+                    "card_type": card_type_value(result.card_type) if result.card_type else "",
                     "scan_id": result.scan_id,
                 },
             )
@@ -1871,7 +1889,7 @@ class AppRouter:
             EVENT_CONFIRMATION_SHOWN,
             {
                 "room_id": result.room_id,
-                "card_type": result.card_type.value if result.card_type else "",
+                "card_type": card_type_value(result.card_type) if result.card_type else "",
                 "scan_id": result.scan_id,
             },
         )
@@ -1983,20 +2001,22 @@ class AppRouter:
         if not self.in_admin_mode or self.current_admin_section != "Settings":
             Toast.show(self.page, "Open Settings before registering a card.", "warning")
             return
-        try:
-            card_type = CardType(card_type_value)
-        except ValueError:
+        card_type = card_type_value.strip().upper()
+        if (
+            card_type != CardType.ADMIN.value
+            and card_type not in CardCategoryRepository.get_active()
+        ):
             Toast.show(self.page, f"Unsupported card type: {card_type_value}", "error")
             return
 
         status = ft.Text(
-            f"Scan the card to register as {card_type.value}.",
+            f"Scan the card to register as {card_type}.",
             size=11,
             color=INK,
         )
         dialog = ft.AlertDialog(
             modal=True,
-            title=ft.Text(f"Register {card_type.value.title()} Card", weight=ft.FontWeight.BOLD),
+            title=ft.Text(f"Register {card_type.title()} Card", weight=ft.FontWeight.BOLD),
             content=ft.Container(
                 width=420,
                 content=ft.Column(
@@ -2051,7 +2071,7 @@ class AppRouter:
             session["first_uid"] = uid
             session["stage"] = "confirm_first"
             status.value = (
-                f"Detected UID {uid} for {session['card_type'].value}. Confirm this assignment, "
+                f"Detected UID {uid} for {session['card_type']}. Confirm this assignment, "
                 "then scan the same card again."
             )
             dialog.content.content.controls[0].controls[1].value = "Card enrollment · Step 2 of 3"
@@ -2067,6 +2087,7 @@ class AppRouter:
             ]
         elif stage == "scan_second":
             if uid != session["first_uid"]:
+                AudioService.error()
                 status.value = (
                     "The second scan did not match. Scan the same card again to continue."
                 )
@@ -2075,7 +2096,7 @@ class AppRouter:
                 return
             session["stage"] = "ready"
             status.value = (
-                f"Both scans match ({uid}). Review the {session['card_type'].value} assignment "
+                f"Both scans match ({uid}). Review the {session['card_type']} assignment "
                 "and save it to the database."
             )
             status.color = SUCCESS_GREEN

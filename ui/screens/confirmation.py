@@ -8,6 +8,7 @@ from ui.theme import *
 from models.sms_result_dto import AlertResult
 from services.audio_service import AudioService
 from config import settings
+from core.constants import card_type_value
 
 
 def build_confirmation_screen(
@@ -17,8 +18,9 @@ def build_confirmation_screen(
     on_cancel: Callable,
     on_timeout: Callable,
 ) -> ft.View:
-    color = get_card_color(alert_result.card_type.value)
-    icon = get_card_icon(alert_result.card_type.value)
+    card_type = card_type_value(alert_result.card_type or "ALERT")
+    color = get_card_color(card_type)
+    icon = get_card_icon(card_type)
     timeout_sec = settings.CONFIRMATION_TIMEOUT_SECONDS
 
     state = {
@@ -34,7 +36,7 @@ def build_confirmation_screen(
         "Confirm within", size=12, color="white"
     )
 
-    if alert_result.card_type.value == "DANGER":
+    if card_type == "DANGER":
         AudioService.error()
     else:
         AudioService.beep()
@@ -97,7 +99,7 @@ def build_confirmation_screen(
                 controls=[
                     ft.Icon(icon, size=80, color="white"),
                     ft.Text(
-                        f"{alert_result.card_type.value} DETECTED",
+                        f"{card_type} DETECTED",
                         size=24, weight=ft.FontWeight.BOLD, color="white",
                     ),
                     ft.Text(f"Room: {alert_result.room_name}", size=16, color="white"),

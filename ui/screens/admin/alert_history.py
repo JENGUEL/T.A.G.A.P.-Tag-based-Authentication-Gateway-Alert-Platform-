@@ -145,7 +145,15 @@ def build_alert_history(page: ft.Page, room_id: int, on_navigate: Callable, on_e
                             ft.Text("Alert History", size=24,
                                     weight=ft.FontWeight.BOLD, color=INK),
                             ft.Text(
-                                f"{info.get('room_name', '')} · {info.get('grade_section', '')} · {info.get('wing', '')}",
+                                " · ".join(
+                                    value
+                                    for value in (
+                                        str(info.get("room_name", "")),
+                                        str(info.get("grade_section", "")),
+                                        str(info.get("floor", "")),
+                                    )
+                                    if value
+                                ),
                                 size=11, color=MUTED,
                             ),
                         ],

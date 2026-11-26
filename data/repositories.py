@@ -18,13 +18,15 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload, selectinload
 
-from core.constants import CardType, SmsStatus
+from core.constants import CardType, SmsStatus, card_type_value
 from data.database import get_db
 from models import (
     Alert,
     Analytics,
+    AppSetting,
     AuditLog,
     Card,
+    CardCategory,
     Parent,
     PoliceStation,
     Room,
@@ -167,20 +169,30 @@ class CardRepository:
             ) is not None
 
     @staticmethod
-    def register(room_id: int, uid: str, card_type: CardType) -> None:
+    def register(room_id: int, uid: str, card_type: CardType | str) -> None:
         normalized_uid = uid.strip()
         if not normalized_uid:
             raise ValueError("A scanned card UID is required.")
-
+        normalized_type = card_type_value(card_type)
         with get_db() as db:
+            if normalized_type != CardType.ADMIN.value:
+                category = db.get(CardCategory, normalized_type)
+                if category is None or not category.active:
+                    raise ValueError(
+                        f"Alert category {normalized_type} is not active."
+                    )
             card = db.scalar(select(Card).where(Card.uid == normalized_uid))
             if card is not None and card.room_id != room_id:
                 raise ValueError("This card is already assigned to another room.")
             if card is None:
-                card = Card(uid=normalized_uid, type=card_type.value, room_id=room_id)
+                card = Card(
+                    uid=normalized_uid,
+                    type=normalized_type,
+                    room_id=room_id,
+                )
                 db.add(card)
             else:
-                card.type = card_type.value
+                card.type = normalized_type
                 card.active = True
 
     @staticmethod
@@ -190,6 +202,140 @@ class CardRepository:
             if card is None:
                 raise LookupError(f"Card {card_id} does not exist.")
             card.active = active
+
+    @staticmethod
+    def delete(card_id: int) -> None:
+        with get_db() as db:
+            card = db.get(Card, card_id)
+            if card is None:
+                raise LookupError(f"Card {card_id} does not exist.")
+            db.delete(card)
+
+
+class CardCategoryRepository:
+    @staticmethod
+    def get_active() -> list[str]:
+        with get_db() as db:
+            return list(
+                db.scalars(
+                    select(CardCategory.name)
+                    .where(CardCategory.active.is_(True))
+                    .order_by(CardCategory.name)
+                )
+            )
+
+    @staticmethod
+    def create(name: str) -> str:
+        normalized = " ".join(name.strip().upper().split())
+        if not normalized or len(normalized) > 32:
+            raise ValueError("Category names must contain 1 to 32 characters.")
+        if normalized == CardType.ADMIN.value:
+            raise ValueError("ADMIN is reserved for system access.")
+        if any(not (character.isalnum() or character in " -_") for character in normalized):
+            raise ValueError("Use only letters, numbers, spaces, hyphens, or underscores.")
+
+        with get_db() as db:
+            category = db.get(CardCategory, normalized)
+            if category is None:
+                category = CardCategory(name=normalized, active=True)
+                db.add(category)
+            elif category.active:
+                raise ValueError(f"{normalized} already exists.")
+            else:
+                category.active = True
+
+            for recipient_type, text in (
+                (
+                    "PARENT",
+                    f"[T.A.G.A.P.] {normalized}: Alert in {{room_name}} at {{timestamp}}. "
+                    "Please follow school instructions. — {school_name}",
+                ),
+                (
+                    "POLICE",
+                    f"[T.A.G.A.P.] {normalized} alert at {{school_name}}, {{room_name}} "
+                    "({floor}) at {timestamp}. Hotline: {school_hotline}",
+                ),
+            ):
+                SmsTemplateRepository.upsert(db, normalized, recipient_type, text)
+        return normalized
+
+    @staticmethod
+    def deactivate(name: str) -> None:
+        normalized = card_type_value(name)
+        if normalized == CardType.ADMIN.value:
+            raise ValueError("ADMIN is reserved for system access.")
+        with get_db() as db:
+            category = db.get(CardCategory, normalized)
+            if category is None or not category.active:
+                raise LookupError(f"Active category {normalized} does not exist.")
+            category.active = False
+            db.query(Card).filter(Card.type == normalized).update(
+                {Card.active: False},
+                synchronize_session=False,
+            )
+            db.query(SmsTemplate).filter(
+                SmsTemplate.card_type == normalized
+            ).delete(synchronize_session=False)
+
+
+class OperationalSettingsRepository:
+    _SETTING_FIELDS = {
+        "dedup_window": ("DEDUPLICATION_WINDOW_SECONDS", 1, 3600),
+        "confirmation_timeout": ("CONFIRMATION_TIMEOUT_SECONDS", 1, 300),
+        "sms_retry_attempts": ("SMS_RETRY_ATTEMPTS", 1, 10),
+    }
+
+    @classmethod
+    def save(cls, values: dict[str, int]) -> None:
+        from config import settings
+
+        validated: dict[str, tuple[str, int]] = {}
+        for key, value in values.items():
+            if key not in cls._SETTING_FIELDS:
+                raise ValueError(f"Unsupported operational setting: {key}")
+            field_name, minimum, maximum = cls._SETTING_FIELDS[key]
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or not minimum <= value <= maximum
+            ):
+                raise ValueError(
+                    f"{key} must be between {minimum} and {maximum}."
+                )
+            validated[key] = (field_name, value)
+
+        with get_db() as db:
+            for key, (_, value) in validated.items():
+                setting = db.get(AppSetting, key)
+                if setting is None:
+                    db.add(AppSetting(key=key, value=str(value)))
+                else:
+                    setting.value = str(value)
+
+        for _, (field_name, value) in validated.items():
+            setattr(settings, field_name, value)
+
+    @classmethod
+    def load_into_runtime(cls) -> None:
+        from config import settings
+
+        with get_db() as db:
+            persisted = {
+                row.key: row.value
+                for row in db.scalars(select(AppSetting))
+            }
+        for key, (field_name, minimum, maximum) in cls._SETTING_FIELDS.items():
+            if key not in persisted:
+                continue
+            try:
+                value = int(persisted[key])
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"Persisted setting {key} is not a valid integer."
+                ) from exc
+            if not minimum <= value <= maximum:
+                raise RuntimeError(f"Persisted setting {key} is out of range.")
+            setattr(settings, field_name, value)
 
 
 # ============================================================
@@ -359,22 +505,28 @@ class StudentRepository:
 
 class SmsTemplateRepository:
     @staticmethod
-    def get(db: Session, card_type: CardType, recipient_type: str) -> Optional[SmsTemplate]:
+    def get(
+        db: Session, card_type: CardType | str, recipient_type: str
+    ) -> Optional[SmsTemplate]:
         return db.scalar(
             select(SmsTemplate).where(
-                SmsTemplate.card_type == card_type.value,
+                SmsTemplate.card_type == card_type_value(card_type),
                 SmsTemplate.recipient_type == recipient_type,
             )
         )
 
     @staticmethod
-    def upsert(db: Session, card_type: CardType, recipient_type: str, text: str) -> SmsTemplate:
+    def upsert(
+        db: Session, card_type: CardType | str, recipient_type: str, text: str
+    ) -> SmsTemplate:
         existing = SmsTemplateRepository.get(db, card_type, recipient_type)
         if existing:
             existing.template_text = text
             return existing
         tpl = SmsTemplate(
-            card_type=card_type.value, recipient_type=recipient_type, template_text=text
+            card_type=card_type_value(card_type),
+            recipient_type=recipient_type,
+            template_text=text,
         )
         db.add(tpl)
         return tpl
@@ -390,13 +542,13 @@ class AlertRepository:
         db: Session,
         *,
         card_uid: str,
-        card_type: CardType,
+        card_type: CardType | str,
         room_id: int,
         triggered_at: datetime,
     ) -> Alert:
         alert = Alert(
             card_uid=card_uid,
-            card_type=card_type.value,
+            card_type=card_type_value(card_type),
             room_id=room_id,
             triggered_at=triggered_at,
         )

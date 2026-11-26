@@ -244,10 +244,7 @@ def _build_story(report: dict[str, Any], generated_at: datetime):
         ],
         [
             "Location",
-            " | ".join(
-                part for part in (str(room["wing"]), str(room["floor"])) if part
-            )
-            or "Not set",
+            str(room["floor"]) or "Not set",
             "Test mode",
             f"RFID: {rfid_mode}; SMS: {sms_mode}",
         ],

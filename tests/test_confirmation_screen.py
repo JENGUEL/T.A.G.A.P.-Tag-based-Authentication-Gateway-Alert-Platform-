@@ -117,3 +117,43 @@ def test_explicit_cancel_cancels_without_confirming(monkeypatch):
     confirmations, cancellations = asyncio.run(scenario())
     assert confirmations == []
     assert cancellations == [True]
+
+
+def test_custom_card_category_is_shown_on_confirmation_screen(monkeypatch):
+    beep_calls = []
+    monkeypatch.setattr(AudioService, "beep", lambda: beep_calls.append(True))
+    monkeypatch.setattr(settings, "CONFIRMATION_TIMEOUT_SECONDS", 0)
+
+    async def scenario():
+        page = FakePage()
+        result = AlertResult(
+            outcome=AlertOutcome.NEEDS_CONFIRMATION,
+            card_uid="F1RE1234",
+            card_type="FIRE DRILL",
+            room_name="Room 201",
+        )
+        view = build_confirmation_screen(
+            page,
+            result,
+            lambda: None,
+            lambda: None,
+            lambda: None,
+        )
+        await page.countdown_task
+        return view
+
+    view = asyncio.run(scenario())
+    assert any(
+        isinstance(control, ft.Text) and control.value == "FIRE DRILL DETECTED"
+        for control in _walk_controls(view)
+    )
+    assert beep_calls == [True]
+
+
+def _walk_controls(control):
+    yield control
+    for child in getattr(control, "controls", []) or []:
+        yield from _walk_controls(child)
+    content = getattr(control, "content", None)
+    if content is not None:
+        yield from _walk_controls(content)

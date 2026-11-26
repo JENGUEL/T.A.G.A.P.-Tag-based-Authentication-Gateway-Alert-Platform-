@@ -37,8 +37,10 @@ def test_roster_editor_persists_editable_grid_rows(monkeypatch):
 
     roster_editor.show_roster_editor(page, 7, lambda: updated.append(True))
     dialog = page.dialog
-    table_rows = dialog.content.content.controls[1]
-    student, contact, phone, _add_contact, _remove = table_rows.controls[0].content.controls
+    workspace = dialog.content.content.controls[1]
+    roster_card = workspace.controls[0]
+    table_rows = roster_card.content.controls[1].controls[0]
+    student, contact, phone, _actions = table_rows.controls[0].content.controls
     student.value = "Student Name"
     contact.value = "Contact Name"
     phone.value = "+639171234567"
@@ -89,9 +91,11 @@ def test_roster_editor_can_add_another_contact_to_a_saved_student(monkeypatch):
 
     roster_editor.show_roster_editor(page, 4)
     dialog = page.dialog
-    table_rows = dialog.content.content.controls[1]
+    workspace = dialog.content.content.controls[1]
+    roster_card = workspace.controls[0]
+    table_rows = roster_card.content.controls[1].controls[0]
     first_row = table_rows.controls[0].content
-    first_row.controls[3].on_click(None)
+    first_row.controls[3].content.controls[0].on_click(None)
     assert len(table_rows.controls) == 2
     added_fields = table_rows.controls[1].content.controls
     assert added_fields[0].value == "Student Name"

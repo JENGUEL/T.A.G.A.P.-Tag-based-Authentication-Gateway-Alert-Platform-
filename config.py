@@ -53,7 +53,7 @@ def _get_str(key: str, default: str) -> str:
 
 @dataclass
 class Settings:
-    """Immutable application settings."""
+    """Application settings loaded from environment and runtime database overrides."""
 
     # --- Application ---
     ENV: str = field(default_factory=lambda: _get_str("TAGAP_ENV", "development"))

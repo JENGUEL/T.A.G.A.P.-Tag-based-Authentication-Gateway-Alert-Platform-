@@ -143,7 +143,7 @@ def _build_room_device_dashboard(room_id: int) -> ft.Control:
                     ]),
                     ft.Column(tight=True, spacing=3, horizontal_alignment=ft.CrossAxisAlignment.END, controls=[
                         ft.Text(info.get("floor", "1st Floor"), size=16, color=INK, weight=ft.FontWeight.BOLD),
-                        ft.Text(info.get("wing", "Building A"), size=10, color=MUTED),
+                        ft.Text("Floor", size=10, color=MUTED),
                     ]),
                 ]),
             ),
@@ -157,7 +157,7 @@ def _build_room_device_dashboard(room_id: int) -> ft.Control:
             ft.Row(alignment=ft.MainAxisAlignment.SPACE_BETWEEN, controls=[
                 ft.Column(tight=True, spacing=3, controls=[
                     ft.Text(info.get("room_name", "Room"), size=25, color=INK, weight=ft.FontWeight.BOLD),
-                    ft.Text(f"{info.get('grade_section', '')} · {info.get('wing', '')} · {info.get('floor', '')}",
+                    ft.Text(f"{info.get('grade_section', '')} · {info.get('floor', '')}",
                             size=11, color=MUTED),
                 ]),
                 ft.Container(padding=ft.Padding.symmetric(horizontal=12, vertical=8), bgcolor="#F8EAEE",

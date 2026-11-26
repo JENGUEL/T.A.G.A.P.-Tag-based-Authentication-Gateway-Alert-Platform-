@@ -86,20 +86,20 @@ Templates are stored in the database, **not hardcoded**. Admins can edit them vi
 ### 5.2 Police Templates (per card type)
 
 **SAFE:**
-[T.A.G.A.P.] SAFE status reported at {school_name}, {room_name} ({wing}) at {timestamp}. No emergency. Situation monitored. — School hotline: {school_hotline}
+[T.A.G.A.P.] SAFE status reported at {school_name}, {room_name} at {timestamp}. No emergency. Situation monitored. — School hotline: {school_hotline}
 
 **ASSIST:**
-[T.A.G.A.P.] ASSIST request at {school_name}, {room_name} ({wing}) at {timestamp}. Situation requires attention. — School hotline: {school_hotline}
+[T.A.G.A.P.] ASSIST request at {school_name}, {room_name} at {timestamp}. Situation requires attention. — School hotline: {school_hotline}
 
 **DANGER:**
-[T.A.G.A.P. EMERGENCY] ACTIVE THREAT reported at {school_name}, {room_name} ({wing}) at {timestamp}. Immediate police response required. Callback: {school_hotline}.
+[T.A.G.A.P. EMERGENCY] ACTIVE THREAT reported at {school_name}, {room_name} at {timestamp}. Immediate police response required. Callback: {school_hotline}.
 
 ---
 
 ## 6. Database Schema (Sprint 2 Scope)
 schools (id, name, hotline, created_at)
 police_stations (id, school_id, name, phone_number)
-rooms (id, school_id, name, wing, floor)
+rooms (id, school_id, name, wing [legacy/unused], floor)
 cards (id, uid, type, room_id, active, created_at)
 students (id, name, room_id)
 parents (id, name, phone_number)
@@ -128,13 +128,17 @@ analytics (id, alert_id, response_time_ms, scan_ts, confirm_ts, queue_ts, sent_t
 
 ### 7.2 View (no PIN)
 
-- Room info (name, wing, floor)
+- Room info (name, floor)
 - School info (name, hotline)
 - Police station (name, phone)
 - GSM status (signal strength, SIM balance, connectivity)
 - Queue status (pending / sent / failed counts)
 - Recent alerts (last 20)
 - Analytics summary (response times, success rates)
+- Manage alert card categories (except the protected ADMIN type) and register matching RFID cards.
+- Configure and persist deduplication (1–3600 seconds), confirmation timeout (1–300 seconds), and SMS retry attempts (1–10).
+
+Legacy Wing values may remain in existing databases, but are omitted from the kiosk, admin UI, reports, and outgoing SMS.
 
 ### 7.3 Destructive Actions (PIN required)
 

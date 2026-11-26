@@ -119,6 +119,7 @@ def build_standby_screen(
         Callable[[ft.Text, ft.Container, Optional[ft.IconButton]], None]
     ] = None,
     sms_connected: bool = True,
+    developer_cards: Optional[list[dict[str, str]]] = None,
 ) -> tuple[ft.View, ft.Text, list[object]]:
     compact = (page.width or 837) < 600
     available_height = page.height or 620
@@ -307,6 +308,20 @@ def build_standby_screen(
 
     developer_panel = ft.Container()
     if developer_mode:
+        mock_card_uids = {
+            card["type"]: card["uid"]
+            for card in (developer_cards or [])
+        }
+        mock_card_uids.setdefault("ADMIN", "CARD-ADMIN-0001")
+        developer_buttons = [
+            ft.Button(
+                card_type,
+                on_click=lambda _, uid=uid: on_card_scanned(uid),
+                bgcolor=get_card_color(card_type),
+                color=ft.Colors.WHITE,
+            )
+            for card_type, uid in mock_card_uids.items()
+        ]
         developer_panel = ft.Container(
             padding=ft.Padding.symmetric(horizontal=12, vertical=8),
             bgcolor="#F8F4F5",
@@ -320,16 +335,7 @@ def build_standby_screen(
                         ft.Text("Developer mock controls", size=10, color=INK,
                                 weight=ft.FontWeight.BOLD),
                     ]),
-                    ft.Row(tight=True, spacing=6, controls=[
-                        ft.Button("SAFE", on_click=lambda _: on_card_scanned("CARD-SAFE-0001"),
-                                  bgcolor=COLOR_SAFE, color=ft.Colors.WHITE),
-                        ft.Button("ASSIST", on_click=lambda _: on_card_scanned("CARD-ASSIST-0001"),
-                                  bgcolor=COLOR_ASSIST, color=ft.Colors.WHITE),
-                        ft.Button("DANGER", on_click=lambda _: on_card_scanned("CARD-DANGER-0001"),
-                                  bgcolor=COLOR_DANGER, color=ft.Colors.WHITE),
-                        ft.Button("ADMIN", on_click=lambda _: on_card_scanned("CARD-ADMIN-0001"),
-                                  bgcolor=COLOR_ADMIN, color=ft.Colors.WHITE),
-                    ]),
+                    ft.Row(tight=True, spacing=6, controls=developer_buttons),
                 ],
             ),
         )
@@ -348,7 +354,7 @@ def build_standby_screen(
                         ft.Column(tight=True, horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=4, controls=[
                             ft.Text("EMERGENCY RFID DRILL STATION", size=12,
                                     color=PRIMARY_RED, weight=ft.FontWeight.BOLD),
-                            ft.Text("North Wing  ·  Emergency Checkpoint A",
+                            ft.Text("Emergency Checkpoint A",
                                     size=11, color=MUTED),
                         ]),
                         scanner,

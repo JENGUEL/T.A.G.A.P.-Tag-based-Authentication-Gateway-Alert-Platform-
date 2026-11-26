@@ -1,6 +1,7 @@
 import asyncio
 
 import flet as ft
+import pytest
 
 from ui import router as router_module
 
@@ -19,6 +20,22 @@ class FakePage:
 
     def update(self):
         return None
+
+
+@pytest.fixture
+def audio_calls(monkeypatch):
+    calls = {"beep": 0, "error": 0}
+    monkeypatch.setattr(
+        router_module.AudioService,
+        "beep",
+        lambda: calls.__setitem__("beep", calls["beep"] + 1),
+    )
+    monkeypatch.setattr(
+        router_module.AudioService,
+        "error",
+        lambda: calls.__setitem__("error", calls["error"] + 1),
+    )
+    return calls
 
 
 def test_reader_monitor_routes_to_settings_when_admin_card_is_missing(monkeypatch):
@@ -40,7 +57,7 @@ def test_reader_monitor_routes_to_settings_when_admin_card_is_missing(monkeypatc
     assert router.page.dialog is None
 
 
-def test_reader_monitor_requires_a_registered_admin_card_scan(monkeypatch):
+def test_reader_monitor_requires_a_registered_admin_card_scan(monkeypatch, audio_calls):
     router = object.__new__(router_module.AppRouter)
     router.page = FakePage()
     router.room_id = 1
@@ -77,9 +94,12 @@ def test_reader_monitor_requires_a_registered_admin_card_scan(monkeypatch):
     assert opened == ["Reader Monitor"]
     assert router.reader_monitor_auth_pending is False
     assert router.page.pop_dialog_calls == 1
+    assert audio_calls == {"beep": 2, "error": 1}
 
 
-def test_card_enrollment_requires_confirmation_and_a_matching_second_scan(monkeypatch):
+def test_card_enrollment_requires_confirmation_and_a_matching_second_scan(
+    monkeypatch, audio_calls
+):
     router = object.__new__(router_module.AppRouter)
     router.page = FakePage()
     router.room_id = 1
@@ -99,6 +119,11 @@ def test_card_enrollment_requires_confirmation_and_a_matching_second_scan(monkey
         router_module.CardRepository,
         "register",
         lambda *args: saved.append(args),
+    )
+    monkeypatch.setattr(
+        router_module.CardCategoryRepository,
+        "get_active",
+        lambda: ["SAFE", "ASSIST", "DANGER"],
     )
     monkeypatch.setattr(
         router,
@@ -124,7 +149,8 @@ def test_card_enrollment_requires_confirmation_and_a_matching_second_scan(monkey
     asyncio.run(dialog.actions[1].on_click(None))
 
     assert saved[0][0:2] == (1, "04AABBCC")
-    assert saved[0][2].value == "ASSIST"
+    assert saved[0][2] == "ASSIST"
     assert router.card_registration_session is None
     assert refreshed == ["Settings"]
     assert router.page.pop_dialog_calls == 1
+    assert audio_calls == {"beep": 3, "error": 1}

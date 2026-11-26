@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Callable
+from typing import Awaitable, Callable
 
 import flet as ft
 
 from core.constants import CardType
 from data import queries
-from data.repositories import CardRepository, StudentRepository
+from data.repositories import (
+    CardCategoryRepository,
+    CardRepository,
+    OperationalSettingsRepository,
+    StudentRepository,
+)
 from services.alert_service import AlertService, validate_sms_template
 from ui.components.roster_editor import show_roster_editor
 from ui.components.toast import Toast
@@ -53,6 +58,32 @@ def _row(label: str, value: str) -> ft.Row:
             ft.Text(label, size=11, color=MUTED),
             ft.Text(value, size=11, weight=ft.FontWeight.W_600, color=INK),
         ],
+    )
+
+
+def _confirm_removal(
+    page: ft.Page,
+    title: str,
+    message: str,
+    action: Callable[[], Awaitable[None]],
+) -> None:
+    async def confirm(_event=None) -> None:
+        page.pop_dialog()
+        await action()
+
+    page.show_dialog(
+        ft.AlertDialog(
+            modal=True,
+            title=ft.Text(title, weight=ft.FontWeight.BOLD),
+            content=ft.Text(message, size=12),
+            actions=[
+                ft.TextButton(
+                    content="Cancel",
+                    on_click=lambda _: page.pop_dialog(),
+                ),
+                ft.TextButton(content="Remove", on_click=confirm),
+            ],
+        )
     )
 
 
@@ -125,6 +156,17 @@ def build_settings(
                 if on_card_updated:
                     on_card_updated()
 
+            async def delete_card(_event=None, card_id=card_id) -> None:
+                try:
+                    await asyncio.to_thread(CardRepository.delete, card_id)
+                except Exception as exc:
+                    logger.exception("Could not remove registered RFID card")
+                    Toast.show(page, f"Could not remove card: {exc}", "error")
+                    return
+                Toast.show(page, "Card removed.", "success")
+                if on_card_updated:
+                    on_card_updated()
+
             rows.append(
                 ft.Container(
                     padding=ft.Padding.symmetric(horizontal=8, vertical=4),
@@ -150,6 +192,16 @@ def build_settings(
                                 content="Disable" if active else "Enable",
                                 on_click=toggle_card,
                             ),
+                            ft.TextButton(
+                                content="Remove",
+                                icon=ft.Icons.DELETE_OUTLINE,
+                                on_click=lambda _event: _confirm_removal(
+                                    page,
+                                    "Remove RFID card?",
+                                    "The card assignment will be removed. Existing alert history will remain.",
+                                    lambda: delete_card(),
+                                ),
+                            ),
                         ],
                     ),
                 )
@@ -158,19 +210,104 @@ def build_settings(
             rows.append(ft.Text("No cards registered for this room.", size=10, color=MUTED))
         return ft.Column(spacing=6, controls=rows)
 
+    category_names = list(
+        snapshot.get(
+            "categories",
+            [card_type.value for card_type in CardType if card_type != CardType.ADMIN],
+        )
+    )
     register_buttons = [
         ft.OutlinedButton(
-            content=f"Register {card_type.value.title()}",
+            content=f"Register {card_type.title()}",
             icon=ft.Icons.ADD_CARD,
             disabled=on_register_card is None,
             on_click=(
-                lambda _, value=card_type.value: on_register_card(value)
+                lambda _, value=card_type: on_register_card(value)
                 if on_register_card
                 else None
             ),
         )
-        for card_type in CardType
+        for card_type in [*category_names, CardType.ADMIN.value]
     ]
+
+    category_name_field = ft.TextField(
+        label="New alert category",
+        hint_text="For example: FIRE DRILL",
+        max_length=32,
+        expand=True,
+    )
+
+    async def add_category(_event=None) -> None:
+        try:
+            await asyncio.to_thread(
+                CardCategoryRepository.create,
+                category_name_field.value or "",
+            )
+        except Exception as exc:
+            Toast.show(page, str(exc), "warning")
+            return
+        category_name_field.value = ""
+        Toast.show(page, "Alert category added.", "success")
+        if on_card_updated:
+            on_card_updated()
+
+    async def delete_category(name: str) -> None:
+        try:
+            await asyncio.to_thread(CardCategoryRepository.deactivate, name)
+        except Exception as exc:
+            logger.exception("Could not remove alert category")
+            Toast.show(page, f"Could not remove category: {exc}", "error")
+            return
+        Toast.show(page, f"{name} category removed; its cards were disabled.", "success")
+        if on_card_updated:
+            on_card_updated()
+
+    category_rows = [
+        ft.Row(
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            controls=[
+                ft.Text(name, size=11, color=INK),
+                ft.TextButton(
+                    content="Remove",
+                    icon=ft.Icons.DELETE_OUTLINE,
+                    disabled=name == CardType.ADMIN.value,
+                    on_click=lambda _event, category=name: _confirm_removal(
+                        page,
+                        f"Remove {category}?",
+                        "Cards assigned to this category will be disabled and its SMS templates removed. "
+                        "Historical alerts will remain.",
+                        lambda: delete_category(category),
+                    ),
+                ),
+            ],
+        )
+        for name in category_names
+    ]
+    category_section = _section(
+        "Alert Card Types",
+        ft.Column(
+            spacing=8,
+            controls=[
+                ft.Text(
+                    "Add or remove alert categories. Each active category uses the "
+                    "confirmation screen and its own editable SMS templates. ADMIN is fixed.",
+                    size=10,
+                    color=MUTED,
+                ),
+                ft.Row(
+                    controls=[
+                        category_name_field,
+                        ft.OutlinedButton(
+                            content="Add Type",
+                            icon=ft.Icons.ADD,
+                            on_click=add_category,
+                        ),
+                    ],
+                ),
+                *(category_rows or [ft.Text("No alert categories configured.", size=10, color=MUTED)]),
+            ],
+        ),
+    )
 
     cards_section = _section(
         "Registered RFID Cards",
@@ -178,7 +315,7 @@ def build_settings(
             spacing=10,
             controls=[
                 ft.Text(
-                    "Register or disable SAFE, ASSIST, DANGER, and ADMIN cards. Enrollment requires "
+                    "Register a configured alert category or ADMIN card. Enrollment requires "
                     "two matching scans and an explicit save.",
                     size=10,
                     color=MUTED,
@@ -202,11 +339,6 @@ def build_settings(
         field: ft.TextField,
         _event=None,
     ) -> None:
-        try:
-            parsed_type = CardType(card_type)
-        except ValueError:
-            Toast.show(page, f"Unsupported card type: {card_type}", "error")
-            return
         text = (field.value or "").strip()
         if not text:
             Toast.show(page, "SMS templates cannot be empty.", "warning")
@@ -218,7 +350,7 @@ def build_settings(
             return
         saved = await asyncio.to_thread(
             AlertService.update_sms_template,
-            parsed_type,
+            card_type,
             recipient_type,
             text,
         )
@@ -272,6 +404,42 @@ def build_settings(
             )
         )
 
+    dedup_field = ft.TextField(
+        label="Deduplication window (seconds)",
+        value=str(snapshot["dedup_window"]),
+        keyboard_type=ft.KeyboardType.NUMBER,
+        width=220,
+    )
+    confirmation_field = ft.TextField(
+        label="RFID confirmation timeout (seconds)",
+        value=str(snapshot["confirmation_timeout"]),
+        keyboard_type=ft.KeyboardType.NUMBER,
+        width=260,
+    )
+    retry_field = ft.TextField(
+        label="SMS retry attempts",
+        value=str(snapshot["sms_retry_attempts"]),
+        keyboard_type=ft.KeyboardType.NUMBER,
+        width=220,
+    )
+
+    async def save_operational_settings(_event=None) -> None:
+        try:
+            values = {
+                "dedup_window": int(dedup_field.value or ""),
+                "confirmation_timeout": int(confirmation_field.value or ""),
+                "sms_retry_attempts": int(retry_field.value or ""),
+            }
+            await asyncio.to_thread(OperationalSettingsRepository.save, values)
+        except (ValueError, TypeError) as exc:
+            Toast.show(page, str(exc) or "Enter whole numbers for all settings.", "warning")
+            return
+        except Exception as exc:
+            logger.exception("Could not save operational settings")
+            Toast.show(page, f"Could not save settings: {exc}", "error")
+            return
+        Toast.show(page, "Operational settings saved.", "success")
+
     content = ft.Column(
         spacing=14,
         controls=[
@@ -302,12 +470,12 @@ def build_settings(
                         _row("System Name", snapshot["system_name"]),
                         _row("Room ID", snapshot["room_id"]),
                         _row("School", info.get("school_name", "")),
-                        _row("Wing", info.get("wing", "")),
                         _row("Floor", info.get("floor", "")),
                     ],
                 ),
             ),
             roster_section,
+            category_section,
             cards_section,
             _section(
                 "Devices & RFID",
@@ -317,12 +485,26 @@ def build_settings(
                     controls=[
                         _row("Mock RFID Mode", str(snapshot["mock_rfid"])),
                         _row("Mock SMS Mode", str(snapshot["mock_sms"])),
-                        _row("Dedup Window", f"{snapshot['dedup_window']} seconds"),
-                        _row(
-                            "Confirmation Timeout",
-                            f"{snapshot['confirmation_timeout']} seconds",
+                        ft.Row(
+                            wrap=True,
+                            spacing=10,
+                            controls=[
+                                dedup_field,
+                                confirmation_field,
+                                retry_field,
+                            ],
                         ),
-                        _row("SMS Retry Attempts", str(snapshot["sms_retry_attempts"])),
+                        ft.Text(
+                            "Allowed: dedup window 1–3600 seconds, confirmation timeout "
+                            "1–300 seconds, SMS retries 1–10 attempts.",
+                            size=10,
+                            color=MUTED,
+                        ),
+                        ft.Button(
+                            content="Save Device & Alert Settings",
+                            icon=ft.Icons.SAVE_OUTLINED,
+                            on_click=save_operational_settings,
+                        ),
                     ],
                 ),
             ),
@@ -344,7 +526,7 @@ def build_settings(
                     spacing=8,
                     controls=[
                         ft.Text(
-                            "Available fields: {room_name}, {wing}, {floor}, {school_name}, "
+                            "Available fields: {room_name}, {floor}, {school_name}, "
                             "{school_hotline}, {timestamp}. Invalid fields are rejected before saving.",
                             size=10,
                             color=MUTED,

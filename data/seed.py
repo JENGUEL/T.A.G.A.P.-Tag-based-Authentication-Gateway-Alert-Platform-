@@ -12,7 +12,16 @@ import logging
 from core.constants import CardType
 from data.database import get_db, init_db
 from data.repositories import SmsTemplateRepository
-from models import Card, Parent, PoliceStation, Room, School, Student, SmsTemplate
+from models import (
+    Card,
+    CardCategory,
+    Parent,
+    PoliceStation,
+    Room,
+    School,
+    Student,
+    SmsTemplate,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,11 +35,11 @@ DEFAULT_TEMPLATES = {
         "[T.A.G.A.P.] DANGER: Emergency in {room_name} at {timestamp}. Follow school instructions. Hotline: {school_hotline}.",
 
     (CardType.SAFE, "POLICE"):
-        "[T.A.G.A.P.] SAFE status at {school_name}, {room_name} ({wing}) at {timestamp}. No emergency. — Hotline: {school_hotline}",
+        "[T.A.G.A.P.] SAFE status at {school_name}, {room_name} at {timestamp}. No emergency. — Hotline: {school_hotline}",
     (CardType.ASSIST, "POLICE"):
-        "[T.A.G.A.P.] ASSIST request at {school_name}, {room_name} ({wing}) at {timestamp}. Situation requires attention. — Hotline: {school_hotline}",
+        "[T.A.G.A.P.] ASSIST request at {school_name}, {room_name} at {timestamp}. Situation requires attention. — Hotline: {school_hotline}",
     (CardType.DANGER, "POLICE"):
-        "[T.A.G.A.P. EMERGENCY] ACTIVE THREAT at {school_name}, {room_name} ({wing}) at {timestamp}. Immediate response required. — Hotline: {school_hotline}",
+        "[T.A.G.A.P. EMERGENCY] ACTIVE THREAT at {school_name}, {room_name} at {timestamp}. Immediate response required. — Hotline: {school_hotline}",
 }
 
 
@@ -66,7 +75,7 @@ def seed() -> None:
                 name="Room 201",
                 room_number="201",
                 section="Grade 7 - Section A",
-                wing="North Wing",
+                wing="",
                 floor="2nd Floor",
             )
             db.add(room)
@@ -82,6 +91,11 @@ def seed() -> None:
             if not room.section:
                 room.section = "Grade 7 - Section A"
 
+        for category_name in ("SAFE", "ASSIST", "DANGER"):
+            if db.get(CardCategory, category_name) is None:
+                db.add(CardCategory(name=category_name, active=True))
+        db.flush()
+
         # --- Cards ---
         card_uids = {
             CardType.SAFE:   "CARD-SAFE-0001",
@@ -89,7 +103,12 @@ def seed() -> None:
             CardType.DANGER: "CARD-DANGER-0001",
         }
         for ctype, uid in card_uids.items():
-            if not db.query(Card).filter_by(uid=uid).first():
+            category = db.get(CardCategory, ctype.value)
+            if (
+                category is not None
+                and category.active
+                and not db.query(Card).filter_by(uid=uid).first()
+            ):
                 db.add(Card(uid=uid, type=ctype.value, room_id=room.id, active=True))
         demo_admin_card = db.query(Card).filter_by(uid="CARD-ADMIN-0001").first()
         if demo_admin_card is not None and demo_admin_card.active:
@@ -118,7 +137,9 @@ def seed() -> None:
 
         # --- SMS Templates ---
         for (ctype, rtype), text in DEFAULT_TEMPLATES.items():
-            SmsTemplateRepository.upsert(db, ctype, rtype, text)
+            category = db.get(CardCategory, ctype.value)
+            if category is not None and category.active:
+                SmsTemplateRepository.upsert(db, ctype, rtype, text)
         logger.info("Seeded %d SMS templates", len(DEFAULT_TEMPLATES))
 
 

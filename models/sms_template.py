@@ -15,7 +15,7 @@ class SmsTemplate(Base, TimestampMixin):
     )
 
     # e.g. "SAFE", "ASSIST", "DANGER"
-    card_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    card_type: Mapped[str] = mapped_column(String(32), nullable=False)
 
     # e.g. "PARENT", "POLICE"
     recipient_type: Mapped[str] = mapped_column(String(16), nullable=False)

@@ -35,10 +35,17 @@ DEFAULT_QUICK_ACTIONS: list[dict[str, object]] = [
 ]
 
 ACTION_ICONS = {
-    "contacts": ft.Icons.CONTACTS,
-    "alert_history": ft.Icons.HISTORY,
-    "diagnostics": ft.Icons.TERMINAL_ROUNDED,
-    "reader_monitor": ft.Icons.CABLE,
+    "contacts": ft.Icons.GROUPS_2_OUTLINED,
+    "alert_history": ft.Icons.HISTORY_ROUNDED,
+    "diagnostics": ft.Icons.TROUBLESHOOT_OUTLINED,
+    "reader_monitor": ft.Icons.SENSORS_ROUNDED,
+}
+
+ACTION_ACCENTS = {
+    "contacts": ("#EEF2FF", "#4A62B8"),
+    "alert_history": ("#F2EEFF", "#7858B5"),
+    "diagnostics": ("#EAF6F3", "#32816B"),
+    "reader_monitor": ("#FFF3E8", "#B87538"),
 }
 
 ACTION_SUBTITLES = {
@@ -99,7 +106,6 @@ def build_room_device(
     room_number = str(info.get("room_number") or info.get("room_name", ""))
     section = str(info.get("section") or "")
     floor = str(info.get("floor") or "")
-    wing = str(info.get("wing") or "")
 
     saved_actions = info.get("quick_actions") or []
     saved_by_key = {
@@ -122,7 +128,7 @@ def build_room_device(
         color=INK,
     )
     location_text = ft.Text(
-        " · ".join(value for value in (section, wing, floor) if value),
+        " · ".join(value for value in (section, floor) if value),
         size=11,
         color=MUTED,
     )
@@ -202,9 +208,9 @@ def build_room_device(
         run_spacing=8,
         controls=[],
     )
-    edit_quick_actions_button = ft.TextButton(
-        content="Edit Quick Actions",
-        icon=ft.Icons.EDIT,
+    edit_quick_actions_button = ft.OutlinedButton(
+        content="Customize actions",
+        icon=ft.Icons.TUNE_ROUNDED,
     )
 
     def refresh_quick_actions():
@@ -213,46 +219,54 @@ def build_room_device(
             if not bool(action.get("enabled")):
                 continue
             action_key = str(action["key"])
+            accent_bg, accent_fg = ACTION_ACCENTS[action_key]
             quick_actions_grid.controls.append(
                 ft.Container(
                     col={"xs": 12, "sm": 6},
-                    padding=9,
-                    bgcolor=CARD_WHITE,
-                    border=ft.Border.all(1, BORDER_COLOR),
-                    border_radius=9,
+                    padding=12,
+                    bgcolor="#FFFFFF",
+                    border=ft.Border.all(1, "#E7EAF0"),
+                    border_radius=13,
                     ink=True,
                     on_click=lambda _, key=action_key: run_quick_action(key),
                     content=ft.Row(
-                        spacing=9,
+                        spacing=11,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
                         controls=[
                             ft.Container(
-                                width=34,
-                                height=34,
+                                width=42,
+                                height=42,
                                 alignment=ft.Alignment.CENTER,
-                                bgcolor=ADMIN_CONTENT_BG,
-                                border_radius=7,
+                                bgcolor=accent_bg,
+                                border_radius=12,
                                 content=ft.Icon(
                                     ACTION_ICONS[action_key],
-                                    size=17,
-                                    color="#5269A3",
+                                    size=20,
+                                    color=accent_fg,
                                 ),
                             ),
                             ft.Column(
+                                expand=True,
                                 tight=True,
-                                spacing=2,
+                                spacing=3,
                                 controls=[
                                     ft.Text(
                                         str(action["label"]),
-                                        size=10,
-                                        weight=ft.FontWeight.W_600,
+                                        size=11,
+                                        weight=ft.FontWeight.BOLD,
                                         color=INK,
                                     ),
                                     ft.Text(
                                         ACTION_SUBTITLES[action_key],
-                                        size=9,
+                                        size=10,
                                         color=MUTED,
                                     ),
                                 ],
+                            ),
+                            ft.Icon(
+                                ft.Icons.ARROW_FORWARD_IOS_ROUNDED,
+                                size=13,
+                                color="#9AA4B2",
                             ),
                         ],
                     ),
@@ -262,27 +276,104 @@ def build_room_device(
     def open_quick_action_editor(_=None):
         editor_state = []
         editor_rows = []
+        enabled_summary = ft.Text(size=10, color=MUTED)
+
+        def refresh_enabled_summary() -> None:
+            enabled_total = sum(1 for _action, toggle, _label in editor_state if toggle.value)
+            enabled_summary.value = f"{enabled_total} of {len(editor_state)} shortcuts visible"
+            try:
+                enabled_summary.update()
+            except RuntimeError:
+                pass
+
         for action in quick_actions:
-            enabled = ft.Checkbox(
+            action_key = str(action["key"])
+            accent_bg, accent_fg = ACTION_ACCENTS[action_key]
+            enabled = ft.Switch(
                 value=bool(action.get("enabled")),
-                label="Show",
-                width=90,
+                active_color=accent_fg,
+                on_change=lambda _event: refresh_enabled_summary(),
             )
             label = ft.TextField(
                 value=str(action.get("label", "")),
-                label=str(action["key"]).replace("_", " ").title(),
-                expand=True,
-                dense=True,
+                label="Action label",
+                hint_text=f"Name shown for {str(action_key).replace('_', ' ')}",
                 max_length=40,
+                dense=True,
+                filled=True,
+                fill_color="#FAFBFD",
+                border_color="#E5E9F0",
+                focused_border_color="#4169D8",
+                border_radius=9,
+                content_padding=ft.Padding.symmetric(horizontal=11, vertical=9),
             )
             editor_state.append((action, enabled, label))
             editor_rows.append(
-                ft.Row(
-                    spacing=10,
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                    controls=[enabled, label],
+                ft.Container(
+                    padding=ft.Padding.all(13),
+                    bgcolor="#FFFFFF",
+                    border=ft.Border.all(1, "#E7EAF0"),
+                    border_radius=13,
+                    content=ft.Column(
+                        tight=True,
+                        spacing=11,
+                        controls=[
+                            ft.Row(
+                                spacing=11,
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                controls=[
+                                    ft.Container(
+                                        width=40,
+                                        height=40,
+                                        alignment=ft.Alignment.CENTER,
+                                        bgcolor=accent_bg,
+                                        border_radius=12,
+                                        content=ft.Icon(
+                                            ACTION_ICONS[action_key],
+                                            size=19,
+                                            color=accent_fg,
+                                        ),
+                                    ),
+                                    ft.Column(
+                                        expand=True,
+                                        tight=True,
+                                        spacing=3,
+                                        controls=[
+                                            ft.Text(
+                                                ACTION_SUBTITLES[action_key],
+                                                size=10,
+                                                color=MUTED,
+                                            ),
+                                            ft.Text(
+                                                str(action["key"]).replace("_", " ").title(),
+                                                size=12,
+                                                weight=ft.FontWeight.BOLD,
+                                                color=INK,
+                                            ),
+                                        ],
+                                    ),
+                                    ft.Column(
+                                        tight=True,
+                                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                                        spacing=1,
+                                        controls=[
+                                            ft.Text(
+                                                "VISIBLE",
+                                                size=8,
+                                                color=accent_fg if enabled.value else MUTED,
+                                                weight=ft.FontWeight.BOLD,
+                                            ),
+                                            enabled,
+                                        ],
+                                    ),
+                                ],
+                            ),
+                            label,
+                        ],
+                    ),
                 )
             )
+        refresh_enabled_summary()
 
         async def save_quick_actions(_event):
             updated_actions = []
@@ -319,22 +410,107 @@ def build_room_device(
             page.update()
             Toast.show(page, "Quick actions updated.", "success")
 
+        title = ft.Row(
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            controls=[
+                ft.Row(
+                    spacing=11,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    controls=[
+                        ft.Container(
+                            width=42,
+                            height=42,
+                            alignment=ft.Alignment.CENTER,
+                            bgcolor="#EEF2FF",
+                            border_radius=13,
+                            content=ft.Icon(
+                                ft.Icons.TUNE_ROUNDED,
+                                size=21,
+                                color="#4A62B8",
+                            ),
+                        ),
+                        ft.Column(
+                            tight=True,
+                            spacing=3,
+                            controls=[
+                                ft.Text(
+                                    "Customize Quick Actions",
+                                    size=18,
+                                    weight=ft.FontWeight.BOLD,
+                                    color="#202A3B",
+                                ),
+                                ft.Text(
+                                    "Choose the shortcuts shown on this room dashboard.",
+                                    size=10,
+                                    color=MUTED,
+                                ),
+                            ],
+                        ),
+                    ],
+                ),
+                ft.IconButton(
+                    icon=ft.Icons.CLOSE_ROUNDED,
+                    tooltip="Close",
+                    icon_color=MUTED,
+                    on_click=lambda _: page.pop_dialog(),
+                ),
+            ],
+        )
+
         page.show_dialog(
             ft.AlertDialog(
                 modal=True,
-                title=ft.Text("Edit Quick Actions", weight=ft.FontWeight.BOLD),
+                bgcolor="#F6F7F9",
+                title=title,
                 content=ft.Container(
-                    width=500,
+                    width=700,
+                    height=470,
                     content=ft.Column(
-                        tight=True,
-                        spacing=8,
+                        expand=True,
+                        spacing=12,
                         controls=[
-                            ft.Text(
-                                "Choose which actions appear here and edit their labels.",
-                                size=11,
-                                color=MUTED,
+                            ft.Container(
+                                padding=ft.Padding.symmetric(horizontal=14, vertical=11),
+                                bgcolor="#EEF2FF",
+                                border=ft.Border.all(1, "#DFE6FB"),
+                                border_radius=11,
+                                content=ft.Row(
+                                    spacing=9,
+                                    controls=[
+                                        ft.Icon(
+                                            ft.Icons.INFO_OUTLINE_ROUNDED,
+                                            color="#4A62B8",
+                                            size=17,
+                                        ),
+                                        ft.Column(
+                                            tight=True,
+                                            spacing=2,
+                                            controls=[
+                                                ft.Text(
+                                                    "Personalize this dashboard",
+                                                    size=11,
+                                                    color="#314785",
+                                                    weight=ft.FontWeight.BOLD,
+                                                ),
+                                                ft.Text(
+                                                    "Turn shortcuts on or off, then adjust their display names.",
+                                                    size=9,
+                                                    color="#5F6F9B",
+                                                ),
+                                            ],
+                                        ),
+                                        ft.Container(expand=True),
+                                        enabled_summary,
+                                    ],
+                                ),
                             ),
-                            *editor_rows,
+                            ft.Column(
+                                expand=True,
+                                spacing=9,
+                                scroll=ft.ScrollMode.AUTO,
+                                controls=editor_rows,
+                            ),
                         ],
                     ),
                 ),
@@ -344,10 +520,14 @@ def build_room_device(
                         on_click=lambda _: page.pop_dialog(),
                     ),
                     ft.Button(
-                        content="Save Actions",
+                        content="Save changes",
+                        icon=ft.Icons.SAVE_OUTLINED,
+                        bgcolor=PRIMARY_RED,
+                        color=ft.Colors.WHITE,
                         on_click=save_quick_actions,
                     ),
                 ],
+                actions_alignment=ft.MainAxisAlignment.END,
             )
         )
 
@@ -693,6 +873,7 @@ def build_room_device(
                 "emergency_status": emergency_status,
                 "edit_info_button": edit_info_button,
                 "quick_actions_grid": quick_actions_grid,
+                "edit_quick_actions_button": edit_quick_actions_button,
             }
         )
 

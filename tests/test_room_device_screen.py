@@ -84,6 +84,38 @@ def test_students_and_contacts_quick_action_opens_shared_editor(monkeypatch):
     assert opened == [(page, 1)]
 
 
+def test_quick_action_editor_saves_switches_and_custom_labels(monkeypatch):
+    page = FakePage()
+    registered = {}
+    saved = []
+    _build_screen(monkeypatch, page, registered)
+    monkeypatch.setattr(
+        room_device.RoomRepository,
+        "update_quick_actions",
+        lambda room_id, actions: saved.append((room_id, actions)),
+    )
+    monkeypatch.setattr(room_device.Toast, "show", lambda *_args, **_kwargs: None)
+
+    registered["edit_quick_actions_button"].on_click(None)
+    dialog = page.dialog
+    action_cards = dialog.content.content.controls[1].controls
+    contacts_card = action_cards[0]
+    contacts_switch = contacts_card.content.controls[0].controls[2].controls[1]
+    contacts_label = contacts_card.content.controls[1]
+    contacts_switch.value = False
+    contacts_label.value = "Family directory"
+
+    asyncio.run(dialog.actions[1].on_click(None))
+
+    assert saved[0][0] == 1
+    assert saved[0][1][0] == {
+        "key": "contacts",
+        "label": "Family directory",
+        "enabled": False,
+    }
+    assert page.pop_dialog_calls == 1
+
+
 def test_room_info_dialog_close_and_cancel_buttons_dismiss(monkeypatch):
     for close_with in ("icon", "cancel"):
         page = FakePage()

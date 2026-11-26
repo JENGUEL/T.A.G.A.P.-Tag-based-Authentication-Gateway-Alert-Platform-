@@ -53,6 +53,7 @@ def test_settings_exposes_roster_cards_and_editable_sms_templates(monkeypatch):
             "mock_rfid": False,
             "mock_sms": False,
             "cards": [{"id": 4, "uid": "A1B2C3D4", "type": "ADMIN", "active": True}],
+            "categories": ["SAFE", "ASSIST", "DANGER", "CUSTOM"],
             "templates": [
                 {
                     "id": 1,
@@ -73,12 +74,18 @@ def test_settings_exposes_roster_cards_and_editable_sms_templates(monkeypatch):
         "get_room_roster",
         lambda _: [],
     )
+    saved_settings = []
+    monkeypatch.setattr(
+        settings_screen.OperationalSettingsRepository,
+        "save",
+        lambda values: saved_settings.append(values),
+    )
     saved_templates = []
     monkeypatch.setattr(
         settings_screen.AlertService,
         "update_sms_template",
         lambda card_type, recipient_type, text: saved_templates.append(
-            (card_type.value, recipient_type, text)
+            (card_type, recipient_type, text)
         )
         or True,
     )
@@ -114,9 +121,24 @@ def test_settings_exposes_roster_cards_and_editable_sms_templates(monkeypatch):
     )
     register_assist.on_click(None)
     assert registered == ["ASSIST"]
+    register_custom = next(
+        control
+        for control in controls
+        if isinstance(control, ft.OutlinedButton)
+        and control.content == "Register Custom"
+    )
+    register_custom.on_click(None)
+    assert registered == ["ASSIST", "CUSTOM"]
+    assert not any(
+        isinstance(control, ft.Text) and "Wing" in str(control.value)
+        for control in controls
+    )
 
     template_field = next(
-        control for control in controls if isinstance(control, ft.TextField)
+        control
+        for control in controls
+        if isinstance(control, ft.TextField)
+        and control.value == "Help requested at {room_name}"
     )
     template_field.value = "Updated message for {room_name}"
     save_template = next(
@@ -128,4 +150,40 @@ def test_settings_exposes_roster_cards_and_editable_sms_templates(monkeypatch):
     asyncio.run(save_template.on_click(None))
     assert saved_templates == [
         ("ASSIST", "PARENT", "Updated message for {room_name}")
+    ]
+
+    dedup_field = next(
+        control
+        for control in controls
+        if isinstance(control, ft.TextField)
+        and control.label == "Deduplication window (seconds)"
+    )
+    confirmation_field = next(
+        control
+        for control in controls
+        if isinstance(control, ft.TextField)
+        and control.label == "RFID confirmation timeout (seconds)"
+    )
+    retry_field = next(
+        control
+        for control in controls
+        if isinstance(control, ft.TextField)
+        and control.label == "SMS retry attempts"
+    )
+    dedup_field.value = "120"
+    confirmation_field.value = "20"
+    retry_field.value = "4"
+    save_settings = next(
+        control
+        for control in controls
+        if isinstance(control, ft.Button)
+        and control.content == "Save Device & Alert Settings"
+    )
+    asyncio.run(save_settings.on_click(None))
+    assert saved_settings == [
+        {
+            "dedup_window": 120,
+            "confirmation_timeout": 20,
+            "sms_retry_attempts": 4,
+        }
     ]
