@@ -26,7 +26,9 @@ def get_rfid_service() -> IRfidService:
     else:
         from services.adapters.rfid_real import SerialRfidService
         _rfid_singleton = SerialRfidService(
-            port=settings.RFID_PORT, baudrate=settings.RFID_BAUDRATE,
+            port=settings.RFID_PORT,
+            baudrate=settings.RFID_BAUDRATE,
+            excluded_ports=(settings.GSM_PORT,) if not settings.USE_MOCK_SMS else (),
         )
         logger.info("DI: Using SerialRfidService on %s", settings.RFID_PORT)
     return _rfid_singleton

@@ -113,6 +113,11 @@ def build_standby_screen(
     on_open_status: Optional[Callable[[], None]] = None,
     on_open_terminal: Optional[Callable[[], None]] = None,
     developer_mode: bool = False,
+    on_open_reader_monitor: Optional[Callable[[], None]] = None,
+    rfid_connected: bool = True,
+    on_mode_controls: Optional[
+        Callable[[ft.Text, ft.Container, Optional[ft.IconButton]], None]
+    ] = None,
 ) -> tuple[ft.View, ft.Text, list[object]]:
     compact = (page.width or 837) < 600
     available_height = page.height or 620
@@ -120,8 +125,23 @@ def build_standby_screen(
     if compact:
         diameter = min(diameter, (page.width or 360) - 48)
 
+    if developer_mode:
+        mode_label = "DEVELOPER MODE"
+        mode_color = "#3976D8"
+    elif settings.USE_MOCK_RFID:
+        mode_label = "SIMULATION MODE"
+        mode_color = WARNING_YELLOW
+    elif rfid_connected:
+        mode_label = "REAL RFID"
+        mode_color = SUCCESS_GREEN
+    else:
+        mode_label = "READER OFFLINE"
+        mode_color = PRIMARY_RED
+
     scanner, ripples, scanner_core = scanner_badge(diameter)
     clock = ft.Text("00:00:00", size=12, weight=ft.FontWeight.BOLD, color=INK)
+    mode_text = ft.Text(mode_label, size=10, color=mode_color, weight=ft.FontWeight.BOLD)
+    mode_dot = status_dot(mode_color, 7)
 
     async def animate_terminal_press(button: ft.Container):
         button.scale = 0.86
@@ -161,9 +181,70 @@ def build_standby_screen(
         ),
     )
 
+    mode_icon = None
+    if compact:
+        reader_monitor_button = ft.IconButton(
+            icon=ft.Icons.CABLE,
+            tooltip="Open RFID reader monitor",
+            on_click=lambda _: on_open_reader_monitor() if on_open_reader_monitor else None,
+        )
+        status_button = ft.IconButton(
+            icon=ft.Icons.MONITOR_HEART,
+            icon_color=mode_color,
+            tooltip=f"{mode_label} · System status",
+            on_click=lambda _: on_open_status() if on_open_status else None,
+        )
+        mode_icon = status_button
+    else:
+        reader_monitor_button = ft.TextButton(
+            content="Reader Monitor",
+            icon=ft.Icons.CABLE,
+            on_click=lambda _: on_open_reader_monitor() if on_open_reader_monitor else None,
+        )
+        status_button = ft.TextButton(
+            content=ft.Row(tight=True, spacing=6, controls=[
+                mode_dot,
+                mode_text,
+            ]),
+            on_click=lambda _: on_open_status() if on_open_status else None,
+        )
+
+    if on_mode_controls:
+        on_mode_controls(mode_text, mode_dot, mode_icon)
+
+    mode_banner = ft.Container()
+    if settings.USE_MOCK_RFID or developer_mode:
+        banner_text = (
+            "DEVELOPER MODE · RFID and SMS are simulated."
+            if developer_mode
+            else "SIMULATION MODE · No real RFID reader is active; SMS sending is disabled."
+        )
+        mode_banner = ft.Container(
+            padding=ft.Padding.symmetric(horizontal=16, vertical=9),
+            bgcolor="#EAF1FF" if developer_mode else "#FFF4D6",
+            border=ft.Border.all(1, "#C9DAF8" if developer_mode else "#F0D98F"),
+            content=ft.Row(
+                tight=True,
+                spacing=8,
+                controls=[
+                    ft.Icon(
+                        ft.Icons.DEVELOPER_MODE if developer_mode else ft.Icons.INFO_OUTLINE,
+                        size=15,
+                        color=mode_color,
+                    ),
+                    ft.Text(
+                        banner_text,
+                        size=10,
+                        color=mode_color,
+                        weight=ft.FontWeight.BOLD,
+                    ),
+                ],
+            ),
+        )
+
     header = ft.Container(
         height=76,
-        padding=ft.Padding.symmetric(horizontal=18 if compact else 34),
+        padding=ft.Padding.symmetric(horizontal=10 if compact else 34),
         bgcolor=CARD_WHITE,
         border=ft.Border.only(bottom=ft.BorderSide(1, BORDER_COLOR)),
         content=ft.Row(
@@ -185,15 +266,10 @@ def build_standby_screen(
                                 weight=ft.FontWeight.W_600),
                     ]),
                 ]),
-                ft.Row(tight=True, spacing=12, controls=[
+                ft.Row(tight=True, spacing=6 if compact else 12, controls=[
+                    reader_monitor_button,
                     clock,
-                    ft.TextButton(
-                        content=ft.Row(tight=True, spacing=6, controls=[
-                            status_dot(SUCCESS_GREEN, 7),
-                            ft.Text("System status", size=11, color=INK),
-                        ]),
-                        on_click=lambda _: on_open_status() if on_open_status else None,
-                    ),
+                    status_button,
                 ]),
             ],
         ),
@@ -233,6 +309,7 @@ def build_standby_screen(
         controls=[
             ft.Column(expand=True, spacing=0, controls=[
                 header,
+                mode_banner,
                 ft.Column(
                     expand=True,
                     alignment=ft.MainAxisAlignment.SPACE_EVENLY,

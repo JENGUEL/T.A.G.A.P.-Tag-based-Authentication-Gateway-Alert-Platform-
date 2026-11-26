@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 def run_preflight_checks(
     progress_callback: Optional[Callable[[str], None]] = None,
+    *,
+    check_rfid: bool = True,
 ) -> list[str]:
     """
     Runs all system diagnostics.
@@ -74,16 +76,16 @@ def run_preflight_checks(
         logger.exception("Boot Check: Source syntax failed")
         errors.append(f"Application source: {exc}")
 
-    # 2. RFID Hardware Check
-    report("Checking RFID connection")
-    try:
-        rfid = get_rfid_service()
-        if not rfid.is_connected():
-            rfid.open() # Attempt to connect
-        logger.info("Boot Check: RFID OK")
-    except (RfidConnectionError, Exception) as e:
-        logger.exception("Boot Check: RFID Failed")
-        errors.append(f"RFID Reader: {str(e)}")
+    if check_rfid:
+        report("Checking RFID connection")
+        try:
+            rfid = get_rfid_service()
+            if not rfid.is_connected():
+                rfid.open()
+            logger.info("Boot Check: RFID OK")
+        except (RfidConnectionError, Exception) as e:
+            logger.exception("Boot Check: RFID Failed")
+            errors.append(f"RFID Reader: {str(e)}")
 
     # 3. GSM Hardware Check
     report("Checking GSM connection")
@@ -103,6 +105,21 @@ def run_preflight_checks(
 def get_system_status() -> dict[str, dict[str, object]]:
     """Collect live status used by the kiosk status modal."""
     status: dict[str, dict[str, object]] = {}
+    if settings.USE_MOCK_RFID:
+        mode_detail = "Simulation mode; real RFID and SMS hardware are not used"
+        mode_label = "SIMULATION MODE"
+        mode_color = "#D9A05B"
+    else:
+        mode_detail = f"Real RFID reader selected on {settings.RFID_PORT}"
+        mode_label = "REAL HARDWARE"
+        mode_color = "#397E68"
+    status["mode"] = {
+        "label": "Operating mode",
+        "connected": True,
+        "detail": mode_detail,
+        "state": mode_label,
+        "color": mode_color,
+    }
 
     try:
         with get_db() as db:
@@ -125,8 +142,22 @@ def get_system_status() -> dict[str, dict[str, object]]:
         status["rfid"] = {
             "label": "RFID reader",
             "connected": connected,
-            "detail": "Mock reader" if settings.USE_MOCK_RFID else "Serial reader",
+            "detail": "Simulated reader" if settings.USE_MOCK_RFID else f"Verified Arduino reader · {settings.RFID_PORT}",
+            "state": "SIMULATED" if settings.USE_MOCK_RFID else "Connected" if connected else "Disconnected",
+            "color": "#D9A05B" if settings.USE_MOCK_RFID else "#397E68" if connected else "#BA384B",
         }
+        if not settings.USE_MOCK_RFID:
+            status["mode"] = {
+                "label": "Operating mode",
+                "connected": connected,
+                "detail": (
+                    f"Verified Arduino reader on {settings.RFID_PORT}"
+                    if connected
+                    else "Real reader selected but not connected"
+                ),
+                "state": "REAL HARDWARE" if connected else "READER OFFLINE",
+                "color": "#397E68" if connected else "#BA384B",
+            }
     except Exception as exc:
         status["rfid"] = {
             "label": "RFID reader",
@@ -148,6 +179,8 @@ def get_system_status() -> dict[str, dict[str, object]]:
                 if signal is not None
                 else "Serial modem"
             ),
+            "state": "SIMULATED" if settings.USE_MOCK_SMS else "Connected" if connected else "Disconnected",
+            "color": "#D9A05B" if settings.USE_MOCK_SMS else "#397E68" if connected else "#BA384B",
         }
     except Exception as exc:
         status["gsm"] = {

@@ -1,0 +1,26 @@
+RC522
+PINS
+    -3.3V
+        -Y_1
+        -3.3V
+    -RST
+        -Y_2
+        -D9
+    -GND
+        -R_1
+        -GND
+    -RQ
+        -R_2
+        -
+    -MISOI
+        -B_1
+        -D12
+    -MOSI
+        -B_2
+        -D11
+    -SCK
+        -G_1
+        -D13
+    -SDA
+        -G_2
+        -D10

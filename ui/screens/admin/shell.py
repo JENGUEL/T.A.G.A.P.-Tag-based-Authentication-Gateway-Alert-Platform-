@@ -108,6 +108,10 @@ def build_admin_shell(
                     active_page == "Alert History", on_navigate,
                 ),
                 _nav_item(
+                    ft.Icons.CABLE, "Reader Monitor",
+                    active_page == "Reader Monitor", on_navigate,
+                ),
+                _nav_item(
                     ft.Icons.SETTINGS_OUTLINED, "Settings",
                     active_page == "Settings", on_navigate,
                 ),

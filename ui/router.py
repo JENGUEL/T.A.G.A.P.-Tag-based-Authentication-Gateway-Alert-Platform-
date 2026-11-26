@@ -22,6 +22,7 @@ from ui.screens.standby import build_standby_screen
 from ui.screens.confirmation import build_confirmation_screen
 from ui.screens.admin.room_device import build_room_device
 from ui.screens.admin.alert_history import build_alert_history
+from ui.screens.admin.reader_monitor import ReaderMonitor
 from ui.screens.admin.settings import build_settings
 from ui.components.toast import Toast
 from ui.theme import *
@@ -40,7 +41,12 @@ class AppRouter:
         # Reference to the inner content area of the shell
         self.body_host: Optional[ft.Container] = None
         self.current_admin_section: str = "Room Device"
+        self.reader_monitor: Optional[ReaderMonitor] = None
         self.developer_mode = False
+        self.reader_connected = False
+        self.mode_text_control: Optional[ft.Text] = None
+        self.mode_dot_control: Optional[ft.Container] = None
+        self.mode_icon_control: Optional[ft.IconButton] = None
         self.command_field: Optional[ft.TextField] = None
         self.command_suggestions: Optional[ft.Text] = None
         self.console_refresh = None
@@ -68,13 +74,20 @@ class AppRouter:
             pass
         self.page.on_keyboard_event = self._handle_keyboard
 
-        self.rfid_listener = RfidListener(self.page, self.handle_card_scan)
+        self.rfid_listener = RfidListener(
+            self.page,
+            self.handle_card_scan,
+            self._on_rfid_connection_changed,
+        )
+        self.reader_connected = self.rfid_listener.rfid.is_connected()
         self.rfid_listener.start()
         self.sms_worker = SmsWorker()
         self.sms_worker.start()
         self.page.run_task(self._clock_tick_loop)
 
         self.show_standby()
+        if settings.USE_MOCK_RFID:
+            self._show_simulation_reminder()
 
     def _handle_keyboard(self, e: ft.KeyboardEvent):
         if e.key == "Tab" and self.command_console_open and self.command_field is not None:
@@ -117,9 +130,52 @@ class AppRouter:
             self.show_system_status,
             self.show_command_console,
             self.developer_mode,
+            self.show_reader_monitor,
+            self.reader_connected,
+            self._register_mode_controls,
         )
         self.page.views.append(view)
         self.page.update()
+
+    def _register_mode_controls(
+        self,
+        mode_text: ft.Text,
+        mode_dot: ft.Container,
+        mode_icon: Optional[ft.IconButton],
+    ):
+        self.mode_text_control = mode_text
+        self.mode_dot_control = mode_dot
+        self.mode_icon_control = mode_icon
+        self._refresh_mode_indicator()
+
+    def _on_rfid_connection_changed(self, connected: bool):
+        self.reader_connected = connected
+        self._refresh_mode_indicator()
+
+    def _refresh_mode_indicator(self):
+        if self.developer_mode:
+            label, color = "DEVELOPER MODE", "#3976D8"
+        elif settings.USE_MOCK_RFID:
+            label, color = "SIMULATION MODE", WARNING_YELLOW
+        elif self.reader_connected:
+            label, color = "REAL RFID", SUCCESS_GREEN
+        else:
+            label, color = "READER OFFLINE", PRIMARY_RED
+
+        if self.mode_text_control is None or self.mode_dot_control is None:
+            return
+        self.mode_text_control.value = label
+        self.mode_text_control.color = color
+        self.mode_dot_control.bgcolor = color
+        if self.mode_icon_control is not None:
+            self.mode_icon_control.icon_color = color
+            self.mode_icon_control.tooltip = f"{label} · System status"
+        try:
+            self.page.update()
+        except RuntimeError:
+            self.mode_text_control = None
+            self.mode_dot_control = None
+            self.mode_icon_control = None
 
     def _stop_standby_animations(self):
         for task in self.standby_animation_tasks:
@@ -147,6 +203,31 @@ class AppRouter:
             )
 
         self.show_standby()
+        if enabled:
+            self._show_simulation_reminder()
+
+    def _show_simulation_reminder(self):
+        dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Row(
+                tight=True,
+                spacing=8,
+                controls=[
+                    ft.Icon(ft.Icons.INFO_OUTLINE, color=WARNING_YELLOW),
+                    ft.Text("Simulation mode is active", size=18, weight=ft.FontWeight.BOLD),
+                ],
+            ),
+            content=ft.Text(
+                "RFID scans and SMS are simulated. No real reader is active and "
+                "no messages will be sent.",
+                size=12,
+                color=INK,
+            ),
+            actions=[
+                ft.TextButton(content="Continue", on_click=lambda _: self.page.pop_dialog())
+            ],
+        )
+        self.page.show_dialog(dialog)
 
     def _complete_command(self, text: str) -> Optional[str]:
         commands = [
@@ -762,6 +843,7 @@ class AppRouter:
                 asyncio.to_thread(sms.open),
             )
 
+            self.reader_connected = rfid.is_connected()
             self.rfid_listener.rfid = rfid
             self.rfid_listener.is_running = True
             self.rfid_listener.start()
@@ -781,6 +863,8 @@ class AppRouter:
                 logger.info("Command console closed after developer mode activation")
                 await asyncio.sleep(0.1)
             self.show_standby()
+            if enable:
+                self._show_simulation_reminder()
             Toast.show(self.page, f"{desired} activated", "success")
         except Exception as exc:
             self._terminal_output(output, f"[ERROR] Could not activate {desired}: {exc}", "#C2414B")
@@ -810,9 +894,21 @@ class AppRouter:
 
     def show_system_status(self):
         status = get_system_status()
+        if self.developer_mode:
+            status["mode"] = {
+                "label": "Operating mode",
+                "connected": True,
+                "detail": "Developer mode; RFID and SMS are simulated",
+                "state": "DEVELOPER MODE",
+                "color": "#3976D8",
+            }
         rows = []
         for item in status.values():
             connected = bool(item["connected"])
+            state = str(item.get("state", "Connected" if connected else "Not connected"))
+            state_color = str(item.get(
+                "color", SUCCESS_GREEN if connected else PRIMARY_RED
+            ))
             rows.append(
                 ft.Container(
                     padding=14,
@@ -829,12 +925,17 @@ class AppRouter:
                             ]),
                             ft.Container(
                                 padding=ft.Padding.symmetric(horizontal=10, vertical=6),
-                                bgcolor="#E8F5F0" if connected else "#FDEBEC",
+                                bgcolor=(
+                                    "#EAF1FF" if state_color == "#3976D8"
+                                    else "#FFF4D6" if state_color == "#D9A05B"
+                                    else "#E8F5F0" if connected
+                                    else "#FDEBEC"
+                                ),
                                 border_radius=8,
                                 content=ft.Text(
-                                    "Connected" if connected else "Not connected",
+                                    state,
                                     size=10,
-                                    color=SUCCESS_GREEN if connected else PRIMARY_RED,
+                                    color=state_color,
                                     weight=ft.FontWeight.BOLD,
                                 ),
                             ),
@@ -930,10 +1031,22 @@ class AppRouter:
         self.page.views.append(view)
         self.page.update()
 
+    def show_reader_monitor(self):
+        self.show_admin("Reader Monitor")
+
     def _build_view(self, section: str) -> ft.View:
         """Builds the full view (shell + content) for a given section."""
         # Rebuilding the view each time is fine because we swap the body_host,
         # not replace the whole view in page.views
+        if section == "Reader Monitor":
+            get_rfid_service().close()
+            self.reader_monitor = ReaderMonitor(self.page)
+            return self.reader_monitor.build(
+                self.room_id or 1, self._navigate_admin, self.exit_admin,
+            )
+        if self.reader_monitor is not None:
+            self.reader_monitor.dispose()
+            self.reader_monitor = None
         if section == "Alert History":
             return build_alert_history(self.page, self.room_id, self._navigate_admin, self.exit_admin)
         elif section == "Settings":
@@ -949,6 +1062,10 @@ class AppRouter:
         # If section is the same as current, do nothing
         if section == self.current_admin_section:
             return
+
+        if self.reader_monitor is not None:
+            self.reader_monitor.dispose()
+            self.reader_monitor = None
 
         # If we somehow lost body_host, fall back to full reload
         if not self.body_host:
@@ -1004,5 +1121,8 @@ class AppRouter:
     def exit_admin(self):
         self.in_admin_mode = False
         self.body_host = None
+        if self.reader_monitor is not None:
+            self.reader_monitor.dispose()
+            self.reader_monitor = None
         self.rfid_listener.start()
         self.show_standby()

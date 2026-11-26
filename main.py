@@ -6,6 +6,8 @@ import logging
 import flet as ft
 
 from core.logger import setup_logger
+from config import settings
+from services import get_rfid_service, reset_services
 from services.boot_service import run_preflight_checks
 from ui.router import AppRouter
 
@@ -171,26 +173,148 @@ async def run_boot_sequence(page: ft.Page):
             page.update()
 
         if step == 6:
-            errors = await asyncio.to_thread(run_preflight_checks)
+            errors = await asyncio.to_thread(run_preflight_checks, check_rfid=False)
 
         page.update()
         previous_index = current_index
         await asyncio.sleep(0.085)
+
+    status_text.value = "Detecting and verifying RFID reader..."
+    page.update()
+    settings.USE_MOCK_RFID = False
+    await asyncio.to_thread(reset_services)
+    rfid_service = get_rfid_service()
+    reader_error = None
+    try:
+        await asyncio.to_thread(rfid_service.open)
+        log.info("Startup verified the TAGAP RFID reader on %s", settings.RFID_PORT)
+    except Exception as exc:
+        reader_error = str(exc)
+        log.warning("Startup could not verify a TAGAP RFID reader: %s", reader_error)
 
     # 3. Finish and Route
     progress.value = 1
     page.update()
     await asyncio.sleep(0.3)
 
+    def start_kiosk():
+        shield_animation.cancel()
+        page.clean()
+        AppRouter(page)
+
+    def show_reader_dialog(error: str):
+        terminal = ft.Column(
+            height=150,
+            spacing=4,
+            scroll=ft.ScrollMode.AUTO,
+            auto_scroll=True,
+            controls=[
+                ft.Text("[STARTUP] Searching for a verified TAGAP RC522 reader...",
+                        size=11, color="#AAB4BE", font_family="Consolas"),
+                ft.Text(f"[NOT FOUND] {error}", size=11, color="#F28B82",
+                        font_family="Consolas"),
+                ft.Text("[READY] Connect the reader and select Connect again.",
+                        size=11, color="#AAB4BE", font_family="Consolas"),
+            ],
+        )
+        connect_button = ft.TextButton(content="Connect again", icon=ft.Icons.REFRESH)
+
+        async def retry_connection(_):
+            connect_button.disabled = True
+            terminal.controls.append(
+                ft.Text("[CONNECTING] Checking USB serial ports...",
+                        size=11, color="#F6C177", font_family="Consolas")
+            )
+            terminal.update()
+            page.update()
+            try:
+                await asyncio.to_thread(rfid_service.open)
+            except Exception as exc:
+                terminal.controls.append(
+                    ft.Text(f"[NOT FOUND] {exc}", size=11, color="#F28B82",
+                            font_family="Consolas")
+                )
+                terminal.controls.append(
+                    ft.Text("[WAITING] Connect the reader and retry.",
+                            size=11, color="#AAB4BE", font_family="Consolas")
+                )
+                connect_button.disabled = False
+                terminal.update()
+                page.update()
+                return
+
+            terminal.controls.append(
+                ft.Text(f"[CONNECTED] Verified TAGAP reader on {settings.RFID_PORT}.",
+                        size=11, color="#81C995", font_family="Consolas")
+            )
+            terminal.update()
+            page.update()
+            await asyncio.sleep(0.3)
+            page.pop_dialog()
+            start_kiosk()
+
+        connect_button.on_click = retry_connection
+
+        async def continue_simulation(_):
+            settings.USE_MOCK_RFID = True
+            settings.USE_MOCK_SMS = True
+            await asyncio.to_thread(reset_services)
+            page.pop_dialog()
+            start_kiosk()
+
+        dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Row(
+                tight=True,
+                spacing=8,
+                controls=[
+                    ft.Icon(ft.Icons.CABLE, color=COLOR_END),
+                    ft.Text("No RFID reader connected", size=18, weight=ft.FontWeight.BOLD),
+                ],
+            ),
+            content=ft.Container(
+                width=560,
+                content=ft.Column(
+                    tight=True,
+                    spacing=10,
+                    controls=[
+                        ft.Text(
+                            "Connect the Arduino reader, then retry. TAGAP will verify "
+                            "the Arduino and RC522 before entering real-reader mode.",
+                            size=12,
+                            color=INK,
+                        ),
+                        ft.Container(
+                            padding=12,
+                            bgcolor="#15191E",
+                            border_radius=8,
+                            content=terminal,
+                        ),
+                    ],
+                ),
+            ),
+            actions=[
+                connect_button,
+                ft.TextButton(
+                    content="Continue in Simulation Mode",
+                    icon=ft.Icons.PLAY_CIRCLE_OUTLINE,
+                    on_click=continue_simulation,
+                ),
+            ],
+        )
+        page.show_dialog(dialog)
+
     if errors:
         status_text.value = "Boot failed. Please contact admin."
         status_text.color = "red"
         page.update()
+
         def continue_with_warning(_):
             page.pop_dialog()
-            shield_animation.cancel()
-            page.clean()
-            AppRouter(page)
+            if reader_error:
+                show_reader_dialog(reader_error)
+            else:
+                start_kiosk()
 
         error_controls = [
             ft.Container(
@@ -224,11 +348,13 @@ async def run_boot_sequence(page: ft.Page):
             ],
         )
         page.show_dialog(dialog)
+    elif reader_error:
+        status_text.value = "RFID reader not detected."
+        status_text.color = COLOR_END
+        page.update()
+        show_reader_dialog(reader_error)
     else:
-        # Success! Load the Kiosk
-        shield_animation.cancel()
-        page.clean()
-        AppRouter(page)
+        start_kiosk()
 
 
 def main(page: ft.Page):
