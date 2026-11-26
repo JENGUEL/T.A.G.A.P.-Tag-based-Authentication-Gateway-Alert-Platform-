@@ -8,7 +8,7 @@ import logging
 import queue
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 from uuid import uuid4
 
 from core.constants import (
@@ -48,6 +48,7 @@ class AppRouter:
     def __init__(self, page: ft.Page):
         self.page = page
         self.current_alert: Optional[AlertResult] = None
+        self.confirmation_scan_action: Optional[Callable[[], None]] = None
         self.clock_ctrl: Optional[ft.Text] = None
         self.room_id: Optional[int] = 1
         self.in_admin_mode = False
@@ -1360,7 +1361,7 @@ class AppRouter:
                 "/developer disable - return to real hardware",
                 "/system status     - open connected-system status",
                 "/system check      - run deep preflight checks",
-                "/mock safe|assist|danger|admin",
+                "/mock ongoing|end|admin (or another registered card type)",
                 "/clear",
             ):
                 self._terminal_output(output, line)
@@ -1380,17 +1381,21 @@ class AppRouter:
         if normalized.startswith("/mock ") and self.developer_mode:
             card_type = normalized.split(maxsplit=1)[1].upper()
             uid_map = {
-                "SAFE": "CARD-SAFE-0001",
-                "ASSIST": "CARD-ASSIST-0001",
-                "DANGER": "CARD-DANGER-0001",
-                "ADMIN": "CARD-ADMIN-0001",
+                str(card["type"]).upper(): str(card["uid"])
+                for card in CardRepository.get_for_room(self.room_id or 1)
+                if bool(card["active"])
             }
+            uid_map.setdefault("ADMIN", "CARD-ADMIN-0001")
             if card_type in uid_map:
                 self._terminal_output(output, f"Simulating {card_type} card tap...")
                 self.close_command_console()
                 self.handle_card_scan(uid_map[card_type])
             else:
-                self._terminal_output(output, "Unknown mock card. Use safe, assist, danger, or admin.", "#F0A5B0")
+                self._terminal_output(
+                    output,
+                    f"No active {card_type} card is registered for this room.",
+                    "#F0A5B0",
+                )
             return
         if normalized.startswith("/mock ") and not self.developer_mode:
             self._terminal_output(output, "Developer Mode is disabled. Run /developer enable.", "#F0A5B0")
@@ -1728,6 +1733,13 @@ class AppRouter:
     def handle_card_scan(self, uid: str):
         AudioService.beep()
         if self.current_alert is not None:
+            pending_uid = (getattr(self.current_alert, "card_uid", None) or "").strip()
+            scan_action = getattr(self, "confirmation_scan_action", None)
+            if (
+                scan_action is not None
+                and uid.strip().casefold() == pending_uid.casefold()
+            ):
+                scan_action()
             return
         scan_id = uuid4().hex
         AlertService.record_operational_event(
@@ -1807,11 +1819,11 @@ class AppRouter:
             Toast.show(self.page, f"Unknown card: {uid}", "error")
 
     def show_confirmation(self, result: AlertResult):
-        self.rfid_listener.stop()
         self._stop_standby_animations()
         self.page.views.clear()
 
         def on_confirm():
+            self.confirmation_scan_action = None
             AlertService.record_operational_event(
                 EVENT_ALERT_CONFIRMED,
                 {
@@ -1835,10 +1847,10 @@ class AppRouter:
                     "success",
                 )
             self.current_alert = None
-            self.rfid_listener.start()
             self.show_standby()
 
         def on_cancel():
+            self.confirmation_scan_action = None
             AlertService.record_operational_event(
                 EVENT_ALERT_CANCELLED,
                 {
@@ -1851,10 +1863,10 @@ class AppRouter:
                 self.page.countdown_task.cancel()
             Toast.show(self.page, "Alert cancelled. No messages were sent.", "warning")
             self.current_alert = None
-            self.rfid_listener.start()
             self.show_standby()
 
         def on_timeout():
+            self.confirmation_scan_action = None
             AlertService.record_operational_event(
                 EVENT_CONFIRMATION_TIMEOUT,
                 {
@@ -1868,7 +1880,6 @@ class AppRouter:
                 result.card_uid,
             )
             self.current_alert = None
-            self.rfid_listener.start()
             self.show_standby()
             Toast.show(
                 self.page,
@@ -1883,6 +1894,7 @@ class AppRouter:
                 on_confirm,
                 on_cancel,
                 on_timeout,
+                lambda action: setattr(self, "confirmation_scan_action", action),
             )
         )
         AlertService.record_operational_event(

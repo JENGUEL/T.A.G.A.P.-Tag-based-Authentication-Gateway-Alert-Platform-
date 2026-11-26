@@ -25,9 +25,15 @@ ADMIN_NAV_HOVER_BG = "#F5F0F2"
 COLOR_SAFE = SUCCESS_GREEN
 COLOR_ASSIST = WARNING_YELLOW
 COLOR_DANGER = PRIMARY_RED
-COLOR_ADMIN = INK
+COLOR_ONGOING = SUCCESS_GREEN
+COLOR_END = PRIMARY_RED
+COLOR_ADMIN = "#3976D8"
 
 def get_card_color(card_type: str) -> str:
+    if card_type == "ONGOING":
+        return COLOR_ONGOING
+    if card_type == "END":
+        return COLOR_END
     if card_type == "SAFE":
         return COLOR_SAFE
     if card_type == "ASSIST":
@@ -39,6 +45,10 @@ def get_card_color(card_type: str) -> str:
     return "#3976D8"
 
 def get_card_icon(card_type: str) -> str:
+    if card_type == "ONGOING":
+        return ft.Icons.PLAY_CIRCLE_OUTLINE
+    if card_type == "END":
+        return ft.Icons.STOP_CIRCLE_OUTLINED
     if card_type == "SAFE":
         return ft.Icons.SHIELD_OUTLINED
     if card_type == "ASSIST":

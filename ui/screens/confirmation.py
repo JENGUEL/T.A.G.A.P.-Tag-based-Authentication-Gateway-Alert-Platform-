@@ -17,6 +17,7 @@ def build_confirmation_screen(
     on_confirm: Callable,
     on_cancel: Callable,
     on_timeout: Callable,
+    on_scan_confirm_ready: Callable[[Callable[[], None]], None] | None = None,
 ) -> ft.View:
     card_type = card_type_value(alert_result.card_type or "ALERT")
     color = get_card_color(card_type)
@@ -36,10 +37,7 @@ def build_confirmation_screen(
         "Confirm within", size=12, color="white"
     )
 
-    if card_type == "DANGER":
-        AudioService.error()
-    else:
-        AudioService.beep()
+    AudioService.beep()
 
     confirm_btn = ft.Button(
         "CONFIRM ALERT",
@@ -84,6 +82,8 @@ def build_confirmation_screen(
 
     confirm_btn.on_click = lambda _: resolve("confirmed", on_confirm)
     cancel_btn.on_click = lambda _: resolve("cancelled", on_cancel)
+    if on_scan_confirm_ready is not None:
+        on_scan_confirm_ready(lambda: resolve("confirmed", on_confirm))
 
     # --- Build UI ---
     view = ft.View(
@@ -108,7 +108,7 @@ def build_confirmation_screen(
                         bgcolor=ft.Colors.with_opacity(0.15, "white"),
                         border_radius=8,
                         content=ft.Text(
-                            "Will notify: Parents + Police Station",
+                            "Will notify: Parents",
                             size=12, color="white",
                         ),
                     ),
@@ -121,7 +121,8 @@ def build_confirmation_screen(
                     ),
                     countdown_label,
                     ft.Text(
-                        "Confirm to send the alert. If time expires, nothing is sent.",
+                        "Tap CONFIRM or scan the same card again. "
+                        "If time expires, nothing is sent.",
                         size=12,
                         color="white",
                         text_align=ft.TextAlign.CENTER,

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 from typing import Awaitable, Callable
 
 import flet as ft
 
+from config import settings
 from core.constants import CardType
 from data import queries
 from data.repositories import (
@@ -213,7 +215,7 @@ def build_settings(
     category_names = list(
         snapshot.get(
             "categories",
-            [card_type.value for card_type in CardType if card_type != CardType.ADMIN],
+            [CardType.ONGOING.value, CardType.END.value],
         )
     )
     register_buttons = [
@@ -289,8 +291,8 @@ def build_settings(
             spacing=8,
             controls=[
                 ft.Text(
-                    "Add or remove alert categories. Each active category uses the "
-                    "confirmation screen and its own editable SMS templates. ADMIN is fixed.",
+                    "The current lockdown flow uses ONGOING and END status cards plus ADMIN; "
+                    "one card slot is unused. Categories remain extensible for future workflows.",
                     size=10,
                     color=MUTED,
                 ),
@@ -359,6 +361,63 @@ def build_settings(
             return
         Toast.show(page, f"{card_type} → {recipient_type} template saved.", "success")
 
+    def request_template_pin(
+        card_type: str,
+        recipient_type: str,
+        field: ft.TextField,
+    ) -> None:
+        pin_field = ft.TextField(
+            label="Admin PIN",
+            password=True,
+            can_reveal_password=True,
+            autofocus=True,
+        )
+        pin_error = ft.Text("", size=11, color=PRIMARY_RED)
+
+        async def verify_and_save(_event=None) -> None:
+            if not hmac.compare_digest(
+                pin_field.value or "",
+                settings.ADMIN_DEFAULT_PIN,
+            ):
+                pin_error.value = "Incorrect PIN. Try again."
+                page.update()
+                return
+            page.pop_dialog()
+            await save_template(card_type, recipient_type, field)
+
+        page.show_dialog(
+            ft.AlertDialog(
+                modal=True,
+                title=ft.Text("Authorize SMS template edit"),
+                content=ft.Container(
+                    width=340,
+                    content=ft.Column(
+                        tight=True,
+                        spacing=8,
+                        controls=[
+                            ft.Text(
+                                "Enter the admin PIN to save this template.",
+                                size=11,
+                                color=MUTED,
+                            ),
+                            pin_field,
+                            pin_error,
+                        ],
+                    ),
+                ),
+                actions=[
+                    ft.TextButton(
+                        content="Cancel",
+                        on_click=lambda _: page.pop_dialog(),
+                    ),
+                    ft.Button(
+                        content="Verify & Save",
+                        on_click=verify_and_save,
+                    ),
+                ],
+            )
+        )
+
     template_cards: list[ft.Control] = []
     for template in snapshot["templates"]:
         card_type = str(template["card_type"])
@@ -393,7 +452,7 @@ def build_settings(
                                     content="Save Template",
                                     icon=ft.Icons.SAVE_OUTLINED,
                                     on_click=lambda event, ct=card_type, rt=recipient_type, control=message: (
-                                        save_template(ct, rt, control, event)
+                                        request_template_pin(ct, rt, control)
                                     ),
                                 ),
                             ],
@@ -526,8 +585,9 @@ def build_settings(
                     spacing=8,
                     controls=[
                         ft.Text(
-                            "Available fields: {room_name}, {floor}, {school_name}, "
-                            "{school_hotline}, {timestamp}. Invalid fields are rejected before saving.",
+                            "Available fields: {grade_section}, {time}, {date}, {room_name}, "
+                            "{floor}, {school_name}, {school_hotline}, {timestamp}. "
+                            "Saving requires the admin PIN.",
                             size=10,
                             color=MUTED,
                         ),

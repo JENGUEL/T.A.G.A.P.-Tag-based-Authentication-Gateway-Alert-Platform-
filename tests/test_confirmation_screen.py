@@ -36,7 +36,7 @@ def _alert_result():
     return AlertResult(
         outcome=AlertOutcome.NEEDS_CONFIRMATION,
         card_uid="04A1B2C3",
-        card_type=CardType.SAFE,
+        card_type=CardType.ONGOING,
         room_name="Room 201",
     )
 
@@ -91,6 +91,31 @@ def test_only_explicit_confirm_runs_confirmation_callback(monkeypatch):
     confirmations, timeouts = asyncio.run(scenario())
     assert confirmations == [True]
     assert timeouts == []
+
+
+def test_repeat_scan_uses_the_same_one_time_confirmation(monkeypatch):
+    monkeypatch.setattr(AudioService, "beep", lambda: None)
+
+    async def scenario():
+        confirmations = []
+        scan_actions = []
+        page = FakePage()
+        view = build_confirmation_screen(
+            page,
+            _alert_result(),
+            lambda: confirmations.append(True),
+            lambda: None,
+            lambda: None,
+            scan_actions.append,
+        )
+        confirm_button = _find_button(view, "CONFIRM ALERT")
+        await asyncio.sleep(0)
+        scan_actions[0]()
+        confirm_button.on_click(None)
+        await page.countdown_task
+        return confirmations
+
+    assert asyncio.run(scenario()) == [True]
 
 
 def test_explicit_cancel_cancels_without_confirming(monkeypatch):

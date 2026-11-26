@@ -359,9 +359,9 @@ def build_standby_screen(
                         ]),
                         scanner,
                         ft.Column(tight=True, horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=7, controls=[
-                            ft.Text("Present an emergency card to the RFID reader.",
+                            ft.Text("Present a lockdown status card to the RFID reader.",
                                     size=17, color=INK, weight=ft.FontWeight.BOLD),
-                            ft.Text("Safe  ·  Assistance  ·  Danger",
+                            ft.Text("Lockdown ongoing  ·  Drill ended",
                                     size=12, color=MUTED),
                         ]),
                         developer_panel,

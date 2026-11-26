@@ -11,8 +11,10 @@ from enum import Enum
 
 
 class CardType(str, Enum):
-    """Built-in RFID card types; alert categories may also be user-defined."""
+    """Built-in RFID types; legacy alert names remain for historical compatibility."""
 
+    ONGOING = "ONGOING"
+    END = "END"
     SAFE = "SAFE"
     ASSIST = "ASSIST"
     DANGER = "DANGER"

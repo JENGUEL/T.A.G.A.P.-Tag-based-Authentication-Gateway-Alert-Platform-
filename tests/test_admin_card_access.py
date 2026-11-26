@@ -123,7 +123,7 @@ def test_card_enrollment_requires_confirmation_and_a_matching_second_scan(
     monkeypatch.setattr(
         router_module.CardCategoryRepository,
         "get_active",
-        lambda: ["SAFE", "ASSIST", "DANGER"],
+        lambda: ["ONGOING", "END"],
     )
     monkeypatch.setattr(
         router,
@@ -132,11 +132,11 @@ def test_card_enrollment_requires_confirmation_and_a_matching_second_scan(
     )
     monkeypatch.setattr(router_module.Toast, "show", lambda *_args, **_kwargs: None)
 
-    router._begin_card_registration("ASSIST")
+    router._begin_card_registration("ONGOING")
     dialog = router.page.dialog
     router.handle_card_scan("04AABBCC")
     assert router.card_registration_session["stage"] == "confirm_first"
-    assert "ASSIST" in dialog.content.content.controls[1].value
+    assert "ONGOING" in dialog.content.content.controls[1].value
     dialog.actions[1].on_click(None)
 
     router.handle_card_scan("DIFFERENT")
@@ -149,7 +149,7 @@ def test_card_enrollment_requires_confirmation_and_a_matching_second_scan(
     asyncio.run(dialog.actions[1].on_click(None))
 
     assert saved[0][0:2] == (1, "04AABBCC")
-    assert saved[0][2] == "ASSIST"
+    assert saved[0][2] == "ONGOING"
     assert router.card_registration_session is None
     assert refreshed == ["Settings"]
     assert router.page.pop_dialog_calls == 1

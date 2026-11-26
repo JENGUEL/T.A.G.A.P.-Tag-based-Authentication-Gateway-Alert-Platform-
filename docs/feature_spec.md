@@ -1,7 +1,7 @@
 # T.A.G.A.P. — Feature Specification v1.0
 
 > **Tag-based Authentication Gateway Alert Platform**
-> Offline-first emergency alert kiosk for school shooting response.
+> Offline-first school lockdown-drill status kiosk.
 
 **Version:** 1.0
 **Status:** Approved — MVP Scope
@@ -12,7 +12,7 @@
 
 ## 1. Purpose
 
-T.A.G.A.P. is a **local-first, offline-capable emergency alert kiosk** deployed in classrooms. Using RFID cards, teachers can instantly report the status of their room during a school shooting or active threat incident. Parents and the nearest police station are notified via SMS — **without requiring internet access**.
+T.A.G.A.P. is a **local-first, offline-capable lockdown-drill status kiosk** deployed in classrooms. Using RFID cards, teachers can report when a school lockdown drill is ongoing or has ended. Parents are notified via SMS — **without requiring internet access**.
 
 The system is designed to be **fast, fail-safe, auditable**, and suitable for research evaluation.
 
@@ -35,12 +35,12 @@ The system uses **4 RFID cards** per kiosk.
 
 | Card | Color | Trigger | Recipients | UI Flow |
 |------|-------|---------|-----------|---------|
-| **SAFE** | Green | Status = Safe | Parents + Police | Standby → Confirm (3s) → Queue → Standby |
-| **ASSIST** | Yellow | Status = Need Assistance | Parents + Police | Standby → Confirm (3s) → Queue → Standby |
-| **DANGER** | Red | Status = Active Threat | Parents + Police | Standby → Confirm (3s) → Queue → Standby |
+| **ONGOING** | Green | Lockdown drill commencing | Parents | Standby → Confirm (3s) → Queue → Standby |
+| **END** | Red | Lockdown drill ended | Parents | Standby → Confirm (3s) → Queue → Standby |
+| N/A | N/A | Unused slot | — | — |
 | **ADMIN** | Blue | Open Settings | — | Standby → Smooth transition → Settings |
 
-> **Note:** ALL card types notify **both** parents and the police station. The system's research goal is maximum awareness during any incident. SMS templates differ per card type to convey correct urgency.
+> **Note:** Alert cards notify parents only. The category and template system remains extensible for future workflows.
 
 ---
 
@@ -50,16 +50,15 @@ The system uses **4 RFID cards** per kiosk.
 2. **Card UID looked up in DB** → returns `CardType` and associated `Room`.
 3. **Deduplication check:** same card within 60s → silently rejected, logged.
 4. **UI transitions to Confirmation screen** (color-coded by status).
-5. **3-second confirmation window** with explicit **CONFIRM ALERT** and **CANCEL** buttons.
+5. **3-second confirmation window**: confirm with **CONFIRM ALERT** or by scanning the same RFID card again; **CANCEL** remains available.
 6. **Only on explicit confirm:**
    - Fetch all students in the room + their parent names + parent phone numbers.
-   - Fetch the school's configured police station number.
-   - Build SMS messages from templates (parents → one message per parent; police → one message).
-   - Insert all into `sms_queue` table (durable, survives reboot).
+   - Build the configured parent message from the alert category's database template.
+   - Insert one SMS per parent into `sms_queue` (durable, survives reboot).
    - Log analytics event.
 7. **On cancel or countdown expiry:** return to Standby without creating an alert or queuing SMS.
 8. **Background SMS worker polls queue every 2s:**
-   - Send via GSM (AT commands).
+   - Send via GSM using concatenated UCS-2 PDU parts when the message exceeds one SMS.
    - Retry 3× with exponential backoff (2s / 4s / 8s) on failure.
    - Treat `+CMGS:` as the modem's submission acknowledgement; it does not confirm parent receipt.
    - Update queue status: `SENT` / `FAILED`.
@@ -74,25 +73,27 @@ Templates are stored in the database, **not hardcoded**. Admins can edit them vi
 
 ### 5.1 Parent Templates
 
-**SAFE:**
-[T.A.G.A.P.] SAFE: Your child in {room_name} is safe. Reported at {timestamp}. No action needed. — {school_name}
+**ONGOING:**
+ST. MARY'S ACADEMY OF PALO
 
-**ASSIST:**
-[T.A.G.A.P.] ASSIST: Assistance requested in {room_name} at {timestamp}. Please monitor for updates. — {school_name}
+This is to inform you that the SCHOOL LOCKDOWN DRILL for {grade_section} is currently ongoing as of {time} on {date}.
 
-**DANGER:**
-[T.A.G.A.P.] DANGER: Emergency in {room_name} at {timestamp}. Follow school instructions. Hotline: {school_hotline}.
+Students and school personnel are following the established safety protocols. Please remain calm and wait for further official announcements from the school.
 
-### 5.2 Police Templates (per card type)
+This is a scheduled drill. Thank you.
 
-**SAFE:**
-[T.A.G.A.P.] SAFE status reported at {school_name}, {room_name} at {timestamp}. No emergency. Situation monitored. — School hotline: {school_hotline}
+Sent via T.A.G.A.P. Communication System
 
-**ASSIST:**
-[T.A.G.A.P.] ASSIST request at {school_name}, {room_name} at {timestamp}. Situation requires attention. — School hotline: {school_hotline}
+**END:**
+ST. MARY'S ACADEMY OF PALO
 
-**DANGER:**
-[T.A.G.A.P. EMERGENCY] ACTIVE THREAT reported at {school_name}, {room_name} at {timestamp}. Immediate police response required. Callback: {school_hotline}.
+This is to inform you that the SCHOOL LOCKDOWN DRILL for {grade_section} has officially concluded as of {time} on {date}.
+
+Students and school personnel have completed the drill in accordance with the school's established safety protocols. Please wait for further official announcements regarding the resumption of regular school activities.
+
+Thank you for your cooperation.
+
+Sent via T.A.G.A.P. Communication System
 
 ---
 
@@ -115,7 +116,7 @@ analytics (id, alert_id, response_time_ms, scan_ts, confirm_ts, queue_ts, sent_t
 - One school → many rooms, many police stations, many cards.
 - One room → many students.
 - One student → many parents (via `student_parents`).
-- One alert → many SMS messages (one per parent + one for police).
+- One alert → one SMS per parent. Police-station records remain in the database but are not alert recipients in this workflow.
 
 ---
 
@@ -257,7 +258,8 @@ Auto-collected on every alert:
 ### Room roster, cards, and reader access
 
 - The Room Device quick action and Settings expose the same editable student/contact roster. Each saved row updates room students and linked parent contacts, which are used by alert recipient selection.
-- Settings can enroll SAFE, ASSIST, DANGER, and ADMIN cards. Enrollment requires an initial scan, operator confirmation, a second matching scan, and an explicit save. Cards can be disabled or re-enabled.
+- Settings can enroll ONGOING, END, and ADMIN cards. Enrollment requires an initial scan, operator confirmation, a second matching scan, and an explicit save. Cards can be disabled or removed.
+- SMS templates are initialized once, stored in the database, and edited only after the admin PIN is verified. Subsequent seeding preserves edits.
 - SMS templates are editable in Settings and saved to the database; alert dispatch uses the saved template for the selected card and recipient type.
 - The kiosk Reader Monitor button routes to Settings for initial ADMIN-card enrollment when none is active. Once an ADMIN card is active, Reader Monitor requires that card to be scanned before access.
 - The built-in `CARD-ADMIN-0001` sample is deactivated during seed repair so it cannot satisfy the real ADMIN-card enrollment gate.

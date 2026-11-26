@@ -5,6 +5,7 @@ Sends SMS through a SIM800 / SIM800L / SIM7600 GSM module over USB-serial.
 
 Key behaviors:
 - AT handshake on `open()`.
+- PDU mode with UCS-2 multipart support for long SMS templates.
 - Per-message timeout.
 - Handles "ERROR" / "NO CARRIER" / missing "OK" responses.
 - Parses "+CMGS: <id>" as delivery acknowledgement.
@@ -14,6 +15,8 @@ Key behaviors:
 from __future__ import annotations
 
 import logging
+import re
+import secrets
 import threading
 import time
 from typing import Optional
@@ -25,6 +28,84 @@ from core.exceptions import GsmConnectionError
 from services.interfaces import ISmsService, SmsResult
 
 logger = logging.getLogger(__name__)
+
+_UCS2_SINGLE_PART_UNITS = 70
+_UCS2_MULTIPART_UNITS = 67
+_MAX_SMS_PARTS = 255
+
+
+def _ucs2_parts(message: str) -> list[bytes]:
+    if not message:
+        raise ValueError("SMS message cannot be empty.")
+
+    encoded_chars = [character.encode("utf-16-be") for character in message]
+    total_units = sum(len(character) // 2 for character in encoded_chars)
+    if total_units <= _UCS2_SINGLE_PART_UNITS:
+        return [b"".join(encoded_chars)]
+
+    parts: list[bytes] = []
+    current_part = bytearray()
+    current_units = 0
+    for encoded_character in encoded_chars:
+        character_units = len(encoded_character) // 2
+        if current_units + character_units > _UCS2_MULTIPART_UNITS:
+            parts.append(bytes(current_part))
+            current_part.clear()
+            current_units = 0
+        current_part.extend(encoded_character)
+        current_units += character_units
+    if current_part:
+        parts.append(bytes(current_part))
+    if len(parts) > _MAX_SMS_PARTS:
+        raise ValueError(f"SMS message exceeds {_MAX_SMS_PARTS} parts.")
+    return parts
+
+
+def _semi_octet_address(phone_number: str) -> tuple[int, int, bytes]:
+    phone_number = phone_number.strip()
+    if not re.fullmatch(r"\+?[\d ()-]+", phone_number):
+        raise ValueError("Phone number contains unsupported characters.")
+
+    international = phone_number.startswith("+") or phone_number.startswith("00")
+    digits = "".join(
+        character for character in phone_number if character in "0123456789"
+    )
+    if phone_number.startswith("00"):
+        digits = digits[2:]
+    if not digits or len(digits) > 20:
+        raise ValueError("Phone number must contain between 1 and 20 digits.")
+
+    semi_octets = bytearray()
+    for index in range(0, len(digits), 2):
+        pair = digits[index:index + 2]
+        if len(pair) == 1:
+            pair += "F"
+        semi_octets.append(int(pair[1] + pair[0], 16))
+    return len(digits), (0x91 if international else 0x81), bytes(semi_octets)
+
+
+def _encode_submit_pdu(
+    phone_number: str,
+    user_data: bytes,
+    *,
+    part_number: int,
+    part_count: int,
+    reference: int,
+) -> tuple[str, int]:
+    address_length, toa, address = _semi_octet_address(phone_number)
+    multipart = part_count > 1
+    user_data_header = (
+        bytes((5, 0, 3, reference, part_count, part_number))
+        if multipart
+        else b""
+    )
+    payload = user_data_header + user_data
+    if len(payload) > 140:
+        raise ValueError("SMS part exceeds the 140-byte payload limit.")
+
+    pdu = bytes((0, 0x41 if multipart else 0x01, 0, address_length))
+    pdu += bytes((toa,)) + address + bytes((0, 8, len(payload))) + payload
+    return pdu.hex().upper(), len(pdu) - 1
 
 
 class Sim800SmsService(ISmsService):
@@ -59,8 +140,8 @@ class Sim800SmsService(ISmsService):
         try:
             if not self._at_ok("AT"):
                 raise GsmConnectionError("GSM module did not respond to AT")
-            if not self._at_ok("AT+CMGF=1"):
-                raise GsmConnectionError("GSM module failed to enter text mode")
+            if not self._at_ok("AT+CMGF=0"):
+                raise GsmConnectionError("GSM module failed to enter PDU mode")
             logger.info("Sim800SmsService opened on %s", self._port)
         except Exception:
             self.close()
@@ -87,25 +168,74 @@ class Sim800SmsService(ISmsService):
         if not self.is_connected():
             raise GsmConnectionError("GSM serial port is not open")
 
+        try:
+            parts = _ucs2_parts(message)
+            _semi_octet_address(phone_number)
+        except ValueError as exc:
+            return SmsResult(
+                success=False,
+                phone_number=phone_number,
+                message=message,
+                reason=str(exc),
+            )
+
+        reference = secrets.randbelow(256)
+        responses: list[str] = []
         with self._lock:
             try:
-                # 1. Set recipient
-                self._write_line(f'AT+CMGS="{phone_number}"')
-                time.sleep(0.5)
+                for part_number, user_data in enumerate(parts, start=1):
+                    pdu, tpdu_length = _encode_submit_pdu(
+                        phone_number,
+                        user_data,
+                        part_number=part_number,
+                        part_count=len(parts),
+                        reference=reference,
+                    )
+                    self._write_line(f"AT+CMGS={tpdu_length}")
+                    prompt_response = self._read_response({">", "ERROR"})
+                    responses.append(prompt_response)
+                    if ">" not in prompt_response:
+                        reason = (
+                            f"modem returned ERROR before part {part_number}"
+                            if "ERROR" in prompt_response
+                            else f"no PDU prompt for part {part_number}"
+                        )
+                        logger.warning(
+                            "SMS FAILED to %s: %s | response=%r",
+                            phone_number,
+                            reason,
+                            "".join(responses),
+                        )
+                        return SmsResult(
+                            success=False,
+                            phone_number=phone_number,
+                            message=message,
+                            reason=reason,
+                            raw_response="".join(responses).strip(),
+                        )
 
-                # 2. Send body + Ctrl-Z
-                self._serial.write(message.encode("utf-8") + b"\x1a")
-
-                # 3. Read response
-                deadline = time.time() + self._timeout
-                response = ""
-                while time.time() < deadline:
-                    line = self._serial.readline().decode("utf-8", errors="ignore")
-                    if line:
-                        response += line
-                    if "+CMGS:" in response or "ERROR" in response:
-                        break
-                    time.sleep(0.05)
+                    self._serial.write(pdu.encode("ascii") + b"\x1a")
+                    send_response = self._read_response({"+CMGS:", "ERROR"})
+                    responses.append(send_response)
+                    if "+CMGS:" not in send_response:
+                        reason = (
+                            f"modem returned ERROR for part {part_number}"
+                            if "ERROR" in send_response
+                            else f"no acknowledgement for part {part_number}"
+                        )
+                        logger.warning(
+                            "SMS FAILED to %s: %s | response=%r",
+                            phone_number,
+                            reason,
+                            "".join(responses),
+                        )
+                        return SmsResult(
+                            success=False,
+                            phone_number=phone_number,
+                            message=message,
+                            reason=reason,
+                            raw_response="".join(responses).strip(),
+                        )
             except serial.SerialException as exc:
                 logger.exception("GSM serial error")
                 connection = self._serial
@@ -122,25 +252,12 @@ class Sim800SmsService(ISmsService):
                     reason=f"serial error: {exc}",
                 )
 
-        if "+CMGS:" in response:
-            logger.info("SMS delivered to %s", phone_number)
-            return SmsResult(
-                success=True,
-                phone_number=phone_number,
-                message=message,
-                raw_response=response.strip(),
-            )
-
-        reason = "no acknowledgement"
-        if "ERROR" in response:
-            reason = "modem returned ERROR"
-        logger.warning("SMS FAILED to %s: %s | response=%r", phone_number, reason, response)
+        logger.info("SMS submitted to modem for %s in %d part(s)", phone_number, len(parts))
         return SmsResult(
-            success=False,
+            success=True,
             phone_number=phone_number,
             message=message,
-            reason=reason,
-            raw_response=response.strip(),
+            raw_response="".join(responses).strip(),
         )
 
     def signal_strength(self) -> Optional[int]:
@@ -189,3 +306,15 @@ class Sim800SmsService(ISmsService):
             if "OK" in buffer or "ERROR" in buffer:
                 return buffer
         return buffer
+
+    def _read_response(self, markers: set[str]) -> str:
+        deadline = time.time() + self._timeout
+        response = ""
+        while time.time() < deadline:
+            line = self._serial.readline().decode("utf-8", errors="ignore")
+            if line:
+                response += line
+            if any(marker in response for marker in markers):
+                break
+            time.sleep(0.05)
+        return response

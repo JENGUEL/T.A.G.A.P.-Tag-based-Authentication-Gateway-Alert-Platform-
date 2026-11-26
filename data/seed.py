@@ -1,8 +1,8 @@
 """
 T.A.G.A.P. - Seed Data
 
-Populates the DB with a demo school, police station, room, 4 cards,
-students, parents, and SMS templates. Idempotent — safe to run multiple times.
+Populates the DB with a demo school, room, RFID cards, students, parents,
+and SMS templates. Idempotent — safe to run multiple times.
 """
 
 from __future__ import annotations
@@ -11,8 +11,8 @@ import logging
 
 from core.constants import CardType
 from data.database import get_db, init_db
-from data.repositories import SmsTemplateRepository
 from models import (
+    AppSetting,
     Card,
     CardCategory,
     Parent,
@@ -27,19 +27,25 @@ logger = logging.getLogger(__name__)
 
 
 DEFAULT_TEMPLATES = {
-    (CardType.SAFE, "PARENT"):
-        "[T.A.G.A.P.] SAFE: Your child in {room_name} is safe. Reported at {timestamp}. No action needed. — {school_name}",
-    (CardType.ASSIST, "PARENT"):
-        "[T.A.G.A.P.] ASSIST: Assistance requested in {room_name} at {timestamp}. Please monitor for updates. — {school_name}",
-    (CardType.DANGER, "PARENT"):
-        "[T.A.G.A.P.] DANGER: Emergency in {room_name} at {timestamp}. Follow school instructions. Hotline: {school_hotline}.",
-
-    (CardType.SAFE, "POLICE"):
-        "[T.A.G.A.P.] SAFE status at {school_name}, {room_name} at {timestamp}. No emergency. — Hotline: {school_hotline}",
-    (CardType.ASSIST, "POLICE"):
-        "[T.A.G.A.P.] ASSIST request at {school_name}, {room_name} at {timestamp}. Situation requires attention. — Hotline: {school_hotline}",
-    (CardType.DANGER, "POLICE"):
-        "[T.A.G.A.P. EMERGENCY] ACTIVE THREAT at {school_name}, {room_name} at {timestamp}. Immediate response required. — Hotline: {school_hotline}",
+    (CardType.ONGOING, "PARENT"): (
+        "ST. MARY'S ACADEMY OF PALO\n\n"
+        "This is to inform you that the SCHOOL LOCKDOWN DRILL for {grade_section} "
+        "is currently ongoing as of {time} on {date}.\n\n"
+        "Students and school personnel are following the established safety protocols. "
+        "Please remain calm and wait for further official announcements from the school.\n\n"
+        "This is a scheduled drill. Thank you.\n\n"
+        "Sent via T.A.G.A.P. Communication System"
+    ),
+    (CardType.END, "PARENT"): (
+        "ST. MARY'S ACADEMY OF PALO\n\n"
+        "This is to inform you that the SCHOOL LOCKDOWN DRILL for {grade_section} "
+        "has officially concluded as of {time} on {date}.\n\n"
+        "Students and school personnel have completed the drill in accordance with "
+        "the school's established safety protocols. Please wait for further official "
+        "announcements regarding the resumption of regular school activities.\n\n"
+        "Thank you for your cooperation.\n\n"
+        "Sent via T.A.G.A.P. Communication System"
+    ),
 }
 
 
@@ -89,18 +95,36 @@ def seed() -> None:
                     else room.name
                 )
             if not room.section:
-                room.section = "Grade 7 - Section A"
+                room.section = "Grade 11 – Section A"
+            elif room.section == "Grade 7 - Section A":
+                room.section = "Grade 11 – Section A"
 
-        for category_name in ("SAFE", "ASSIST", "DANGER"):
+        for category_name in (CardType.ONGOING.value, CardType.END.value):
             if db.get(CardCategory, category_name) is None:
                 db.add(CardCategory(name=category_name, active=True))
         db.flush()
 
+        migration_key = "legacy_alert_cards_retired_v1"
+        if db.get(AppSetting, migration_key) is None:
+            legacy_types = (
+                CardType.SAFE.value,
+                CardType.ASSIST.value,
+                CardType.DANGER.value,
+            )
+            for category_name in legacy_types:
+                category = db.get(CardCategory, category_name)
+                if category is not None:
+                    category.active = False
+            db.query(Card).filter(Card.type.in_(legacy_types)).update(
+                {Card.active: False},
+                synchronize_session=False,
+            )
+            db.add(AppSetting(key=migration_key, value="1"))
+
         # --- Cards ---
         card_uids = {
-            CardType.SAFE:   "CARD-SAFE-0001",
-            CardType.ASSIST: "CARD-ASSIST-0001",
-            CardType.DANGER: "CARD-DANGER-0001",
+            CardType.ONGOING: "CARD-ONGOING-0001",
+            CardType.END: "CARD-END-0001",
         }
         for ctype, uid in card_uids.items():
             category = db.get(CardCategory, ctype.value)
@@ -139,7 +163,18 @@ def seed() -> None:
         for (ctype, rtype), text in DEFAULT_TEMPLATES.items():
             category = db.get(CardCategory, ctype.value)
             if category is not None and category.active:
-                SmsTemplateRepository.upsert(db, ctype, rtype, text)
+                existing = db.query(SmsTemplate).filter_by(
+                    card_type=ctype.value,
+                    recipient_type=rtype,
+                ).first()
+                if existing is None:
+                    db.add(
+                        SmsTemplate(
+                            card_type=ctype.value,
+                            recipient_type=rtype,
+                            template_text=text,
+                        )
+                    )
         logger.info("Seeded %d SMS templates", len(DEFAULT_TEMPLATES))
 
 

@@ -26,6 +26,25 @@ def test_failed_modem_handshake_closes_serial_port(monkeypatch):
     assert service.is_connected() is False
 
 
+def test_modem_enters_pdu_mode_on_open(monkeypatch):
+    class FakeSerial:
+        is_open = True
+
+        def close(self):
+            self.is_open = False
+
+    commands = []
+    connection = FakeSerial()
+    monkeypatch.setattr(sms_real.serial, "Serial", lambda **_kwargs: connection)
+    service = Sim800SmsService("COM4")
+    monkeypatch.setattr(service, "_at_ok", lambda command: commands.append(command) or True)
+
+    service.open()
+
+    assert commands == ["AT", "AT+CMGF=0"]
+    service.close()
+
+
 def test_modem_presence_checks_only_configured_port(monkeypatch):
     service = Sim800SmsService("COM4")
     monkeypatch.setattr(

@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 
 from ui import router as router_module
@@ -63,4 +65,28 @@ def test_card_scan_beeps_even_when_an_alert_is_already_open(monkeypatch, beep_ca
 
     router.handle_card_scan("A1B2C3D4")
 
+    assert beep_calls == ["beep"]
+
+
+def test_scanning_the_pending_alert_card_confirms_it(beep_calls):
+    router = object.__new__(router_module.AppRouter)
+    router.current_alert = SimpleNamespace(card_uid="A1B2C3D4")
+    confirmations = []
+    router.confirmation_scan_action = lambda: confirmations.append(True)
+
+    router.handle_card_scan("a1b2c3d4")
+
+    assert confirmations == [True]
+    assert beep_calls == ["beep"]
+
+
+def test_scanning_a_different_card_does_not_confirm_pending_alert(beep_calls):
+    router = object.__new__(router_module.AppRouter)
+    router.current_alert = SimpleNamespace(card_uid="A1B2C3D4")
+    confirmations = []
+    router.confirmation_scan_action = lambda: confirmations.append(True)
+
+    router.handle_card_scan("DIFFERENT")
+
+    assert confirmations == []
     assert beep_calls == ["beep"]

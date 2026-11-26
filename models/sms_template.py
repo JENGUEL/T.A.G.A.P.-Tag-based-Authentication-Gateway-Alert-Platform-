@@ -14,7 +14,7 @@ class SmsTemplate(Base, TimestampMixin):
         UniqueConstraint("card_type", "recipient_type", name="uq_template_card_recipient"),
     )
 
-    # e.g. "SAFE", "ASSIST", "DANGER"
+    # Built-in or user-defined alert category, e.g. "ONGOING"
     card_type: Mapped[str] = mapped_column(String(32), nullable=False)
 
     # e.g. "PARENT", "POLICE"

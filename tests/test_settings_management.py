@@ -2,6 +2,7 @@ import asyncio
 
 import flet as ft
 
+from config import settings
 from ui.screens.admin import settings as settings_screen
 
 
@@ -53,11 +54,11 @@ def test_settings_exposes_roster_cards_and_editable_sms_templates(monkeypatch):
             "mock_rfid": False,
             "mock_sms": False,
             "cards": [{"id": 4, "uid": "A1B2C3D4", "type": "ADMIN", "active": True}],
-            "categories": ["SAFE", "ASSIST", "DANGER", "CUSTOM"],
+            "categories": ["ONGOING", "END", "CUSTOM"],
             "templates": [
                 {
                     "id": 1,
-                    "card_type": "ASSIST",
+                    "card_type": "ONGOING",
                     "recipient_type": "PARENT",
                     "text": "Help requested at {room_name}",
                 }
@@ -117,10 +118,10 @@ def test_settings_exposes_roster_cards_and_editable_sms_templates(monkeypatch):
         control
         for control in controls
         if isinstance(control, ft.OutlinedButton)
-        and control.content == "Register Assist"
+        and control.content == "Register Ongoing"
     )
     register_assist.on_click(None)
-    assert registered == ["ASSIST"]
+    assert registered == ["ONGOING"]
     register_custom = next(
         control
         for control in controls
@@ -128,7 +129,7 @@ def test_settings_exposes_roster_cards_and_editable_sms_templates(monkeypatch):
         and control.content == "Register Custom"
     )
     register_custom.on_click(None)
-    assert registered == ["ASSIST", "CUSTOM"]
+    assert registered == ["ONGOING", "CUSTOM"]
     assert not any(
         isinstance(control, ft.Text) and "Wing" in str(control.value)
         for control in controls
@@ -147,9 +148,22 @@ def test_settings_exposes_roster_cards_and_editable_sms_templates(monkeypatch):
         if isinstance(control, ft.OutlinedButton)
         and control.content == "Save Template"
     )
-    asyncio.run(save_template.on_click(None))
+    save_template.on_click(None)
+    pin_field = next(
+        control
+        for control in _walk(page.dialog)
+        if isinstance(control, ft.TextField) and control.label == "Admin PIN"
+    )
+    pin_field.value = "wrong"
+    asyncio.run(page.dialog.actions[1].on_click(None))
+    assert any(
+        isinstance(control, ft.Text) and control.value == "Incorrect PIN. Try again."
+        for control in _walk(page.dialog)
+    )
+    pin_field.value = settings.ADMIN_DEFAULT_PIN
+    asyncio.run(page.dialog.actions[1].on_click(None))
     assert saved_templates == [
-        ("ASSIST", "PARENT", "Updated message for {room_name}")
+        ("ONGOING", "PARENT", "Updated message for {room_name}")
     ]
 
     dedup_field = next(

@@ -153,6 +153,7 @@ def get_settings_snapshot(room_id: int) -> dict[str, Any]:
         templates = (
             db.query(SmsTemplate)
             .filter(SmsTemplate.card_type.in_(category_names))
+            .filter(SmsTemplate.recipient_type == "PARENT")
             .all()
         )
 

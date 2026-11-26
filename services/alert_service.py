@@ -42,22 +42,24 @@ from data.repositories import (
     CardRepository,
     DeduplicationChecker,
     ParentRepository,
-    PoliceStationRepository,
     SmsQueueRepository,
     SmsTemplateRepository,
 )
-from models import Room
+from models import Room, School
 from models.sms_result_dto import AlertOutcome, AlertResult
 
 logger = logging.getLogger(__name__)
 
 _SMS_TEMPLATE_SAMPLE_CONTEXT = {
     "room_name": "Room 201",
+    "grade_section": "Grade 11 – Section A",
     "wing": "",
     "floor": "2nd Floor",
     "school_name": "Sample School",
     "school_hotline": "000",
     "timestamp": "2026-01-01 12:00",
+    "time": "12:00 PM",
+    "date": "January 01, 2026",
 }
 
 
@@ -69,6 +71,21 @@ def validate_sms_template(template_text: str) -> None:
         template_text.format(**_SMS_TEMPLATE_SAMPLE_CONTEXT)
     except (IndexError, KeyError, ValueError) as exc:
         raise ValueError(f"Invalid SMS template field or format: {exc}") from exc
+
+
+def _sms_context(room: Room, school: School, confirmed_at: datetime) -> dict[str, str]:
+    local_time = confirmed_at.astimezone()
+    return {
+        "room_name": room.name,
+        "grade_section": room.section or "Section not set",
+        "wing": "",
+        "floor": room.floor,
+        "school_name": school.name,
+        "school_hotline": school.hotline,
+        "timestamp": local_time.strftime("%Y-%m-%d %H:%M"),
+        "time": local_time.strftime("%I:%M %p"),
+        "date": local_time.strftime("%B %d, %Y"),
+    }
 
 
 class AlertService:
@@ -275,24 +292,10 @@ class AlertService:
                 alert.confirmed_at = confirmed_at
 
                 parents = ParentRepository.get_for_room(db, room.id)
-                police_stations = PoliceStationRepository.get_for_school(db, school.id)
-
                 parent_tpl = SmsTemplateRepository.get(db, card_type, "PARENT")
-                police_tpl = SmsTemplateRepository.get(db, card_type, "POLICE")
-
                 if parent_tpl is None:
                     raise RuntimeError(f"Missing PARENT template for {type_name}")
-                if police_tpl is None:
-                    raise RuntimeError(f"Missing POLICE template for {type_name}")
-
-                context = {
-                    "room_name": room.name,
-                    "wing": "",
-                    "floor": room.floor,
-                    "school_name": school.name,
-                    "school_hotline": school.hotline,
-                    "timestamp": confirmed_at.strftime("%Y-%m-%d %H:%M"),
-                }
+                context = _sms_context(room, school, confirmed_at)
 
                 queued = 0
                 for parent in parents:
@@ -302,17 +305,6 @@ class AlertService:
                         alert_id=alert.id,
                         recipient_type="PARENT",
                         phone_number=parent.phone_number,
-                        message=msg,
-                    )
-                    queued += 1
-
-                for station in police_stations:
-                    msg = police_tpl.template_text.format(**context)
-                    SmsQueueRepository.enqueue(
-                        db,
-                        alert_id=alert.id,
-                        recipient_type="POLICE",
-                        phone_number=station.phone_number,
                         message=msg,
                     )
                     queued += 1
@@ -336,7 +328,6 @@ class AlertService:
                         "card_type": type_name,
                         "scan_id": scan_id,
                         "parents": len(parents),
-                        "police": len(police_stations),
                         "sms_queued": queued,
                     }),
                 )
@@ -381,7 +372,7 @@ class AlertService:
     def initiate_manual_alert(card_type: CardType) -> AlertResult:
         """
         Step 1 of manual trigger. The UI shows a prompt:
-        'Scan admin card to confirm DANGER alert.'
+        'Scan admin card to confirm the requested alert.'
 
         Returns a result indicating we're waiting for admin verification.
         """
@@ -442,22 +433,13 @@ class AlertService:
                 alert.confirmed_at = confirmed_at
 
                 parents = ParentRepository.get_for_room(db, room.id)
-                police_stations = PoliceStationRepository.get_for_school(db, room.school.id)
-
                 parent_tpl = SmsTemplateRepository.get(db, card_type, "PARENT")
-                police_tpl = SmsTemplateRepository.get(db, card_type, "POLICE")
+                if parent_tpl is None:
+                    raise RuntimeError(
+                        f"Missing PARENT template for {card_type_value(card_type)}"
+                    )
 
-                if parent_tpl is None or police_tpl is None:
-                    raise RuntimeError("Missing SMS templates")
-
-                context = {
-                    "room_name": room.name,
-                    "wing": "",
-                    "floor": room.floor,
-                    "school_name": room.school.name,
-                    "school_hotline": room.school.hotline,
-                    "timestamp": confirmed_at.strftime("%Y-%m-%d %H:%M"),
-                }
+                context = _sms_context(room, room.school, confirmed_at)
 
                 queued = 0
                 for parent in parents:
@@ -467,16 +449,6 @@ class AlertService:
                         recipient_type="PARENT",
                         phone_number=parent.phone_number,
                         message=parent_tpl.template_text.format(**context),
-                    )
-                    queued += 1
-
-                for station in police_stations:
-                    SmsQueueRepository.enqueue(
-                        db,
-                        alert_id=alert.id,
-                        recipient_type="POLICE",
-                        phone_number=station.phone_number,
-                        message=police_tpl.template_text.format(**context),
                     )
                     queued += 1
 
