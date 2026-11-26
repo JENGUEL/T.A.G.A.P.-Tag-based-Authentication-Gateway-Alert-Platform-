@@ -51,6 +51,10 @@ class IRfidService(ABC):
     def is_connected(self) -> bool:
         """Return True if the reader is ready to serve reads."""
 
+    @abstractmethod
+    def is_device_present(self) -> bool:
+        """Return True if a candidate reader is currently discoverable."""
+
 
 # ============================================================
 # SMS Service (Port)
@@ -92,6 +96,10 @@ class ISmsService(ABC):
     @abstractmethod
     def is_connected(self) -> bool:
         """Return True if the modem is ready."""
+
+    @abstractmethod
+    def is_device_present(self) -> bool:
+        """Return True if the configured modem device is currently discoverable."""
 
     @abstractmethod
     def signal_strength(self) -> Optional[int]:

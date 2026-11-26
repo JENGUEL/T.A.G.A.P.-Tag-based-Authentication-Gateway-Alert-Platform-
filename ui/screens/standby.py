@@ -118,6 +118,7 @@ def build_standby_screen(
     on_mode_controls: Optional[
         Callable[[ft.Text, ft.Container, Optional[ft.IconButton]], None]
     ] = None,
+    sms_connected: bool = True,
 ) -> tuple[ft.View, ft.Text, list[object]]:
     compact = (page.width or 837) < 600
     available_height = page.height or 620
@@ -128,15 +129,21 @@ def build_standby_screen(
     if developer_mode:
         mode_label = "DEVELOPER MODE"
         mode_color = "#3976D8"
-    elif settings.USE_MOCK_RFID:
+    elif settings.USE_MOCK_RFID and settings.USE_MOCK_SMS:
         mode_label = "SIMULATION MODE"
         mode_color = WARNING_YELLOW
-    elif rfid_connected:
-        mode_label = "REAL RFID"
-        mode_color = SUCCESS_GREEN
-    else:
+    elif settings.USE_MOCK_RFID or settings.USE_MOCK_SMS:
+        mode_label = "MIXED MODE"
+        mode_color = WARNING_YELLOW
+    elif not rfid_connected:
         mode_label = "READER OFFLINE"
         mode_color = PRIMARY_RED
+    elif not sms_connected:
+        mode_label = "DEGRADED MODE"
+        mode_color = WARNING_YELLOW
+    elif rfid_connected:
+        mode_label = "REAL HARDWARE"
+        mode_color = SUCCESS_GREEN
 
     scanner, ripples, scanner_core = scanner_badge(diameter)
     clock = ft.Text("00:00:00", size=12, weight=ft.FontWeight.BOLD, color=INK)
@@ -213,16 +220,39 @@ def build_standby_screen(
         on_mode_controls(mode_text, mode_dot, mode_icon)
 
     mode_banner = ft.Container()
-    if settings.USE_MOCK_RFID or developer_mode:
+    if developer_mode:
+        banner_text = "DEVELOPER MODE · RFID and SMS are simulated."
+        banner_color = "#3976D8"
+        banner_bg = "#EAF1FF"
+        banner_border = "#C9DAF8"
+    elif settings.USE_MOCK_RFID or settings.USE_MOCK_SMS:
         banner_text = (
-            "DEVELOPER MODE · RFID and SMS are simulated."
-            if developer_mode
-            else "SIMULATION MODE · No real RFID reader is active; SMS sending is disabled."
+            f"MIXED MODE · RFID: {'simulated' if settings.USE_MOCK_RFID else 'real'}; "
+            f"SMS: {'simulated' if settings.USE_MOCK_SMS else 'real'}."
+            if settings.USE_MOCK_RFID != settings.USE_MOCK_SMS
+            else "SIMULATION MODE · RFID and SMS are simulated; no real messages are sent."
         )
+        banner_color = "#8A5A00"
+        banner_bg = "#FFF4D6"
+        banner_border = "#F0D98F"
+    elif not rfid_connected or not sms_connected:
+        banner_text = (
+            "DEGRADED MODE · "
+            f"RFID {'online' if rfid_connected else 'offline'}; "
+            f"GSM {'online' if sms_connected else 'offline'}. "
+            "Offline SMS remains queued."
+        )
+        banner_color = PRIMARY_RED if not rfid_connected else "#8A5A00"
+        banner_bg = "#FDEBEC" if not rfid_connected else "#FFF4D6"
+        banner_border = "#F4D9DE" if not rfid_connected else "#F0D98F"
+    else:
+        banner_text = ""
+
+    if banner_text:
         mode_banner = ft.Container(
             padding=ft.Padding.symmetric(horizontal=16, vertical=9),
-            bgcolor="#EAF1FF" if developer_mode else "#FFF4D6",
-            border=ft.Border.all(1, "#C9DAF8" if developer_mode else "#F0D98F"),
+            bgcolor=banner_bg,
+            border=ft.Border.all(1, banner_border),
             content=ft.Row(
                 tight=True,
                 spacing=8,
@@ -230,12 +260,12 @@ def build_standby_screen(
                     ft.Icon(
                         ft.Icons.DEVELOPER_MODE if developer_mode else ft.Icons.INFO_OUTLINE,
                         size=15,
-                        color=mode_color,
+                        color=banner_color,
                     ),
                     ft.Text(
                         banner_text,
                         size=10,
-                        color=mode_color,
+                        color=banner_color,
                         weight=ft.FontWeight.BOLD,
                     ),
                 ],

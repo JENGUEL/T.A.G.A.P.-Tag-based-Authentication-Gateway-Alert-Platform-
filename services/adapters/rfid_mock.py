@@ -48,6 +48,9 @@ class MockRfidService(IRfidService):
     def is_connected(self) -> bool:
         return self._open
 
+    def is_device_present(self) -> bool:
+        return True
+
     # --- Test helper ---
 
     def queue_tap(self, uid: str) -> None:

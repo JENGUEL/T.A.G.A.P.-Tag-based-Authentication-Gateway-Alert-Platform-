@@ -14,12 +14,19 @@ Design:
 from __future__ import annotations
 
 import logging
+import json
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from typing import Callable
 
 from config import settings
-from core.constants import EVENT_SMS_FAILED, EVENT_SMS_SENT, SmsStatus
+from core.constants import (
+    EVENT_SMS_DISPATCH_STARTED,
+    EVENT_SMS_FAILED,
+    EVENT_SMS_SENT,
+    SmsStatus,
+)
 from data.database import get_db
 from data.repositories import AuditLogRepository, SmsQueueRepository
 from models import Analytics, SmsQueue
@@ -34,11 +41,21 @@ class SmsWorker:
     """Background worker that delivers queued SMS messages."""
 
     POLL_INTERVAL_SECONDS = 2
+    DEVICE_DETECTION_INTERVAL_SECONDS = 3
 
-    def __init__(self, sms_service: ISmsService | None = None) -> None:
+    def __init__(
+        self,
+        sms_service: ISmsService | None = None,
+        *,
+        wait_for_device_reconnect: bool = False,
+        on_connection_changed: Callable[[bool], None] | None = None,
+    ) -> None:
         self._sms = sms_service or get_sms_service()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._next_device_check_at = 0.0
+        self._wait_for_device_reconnect = wait_for_device_reconnect
+        self._on_connection_changed = on_connection_changed
 
     # ============================================================
     # Lifecycle
@@ -80,6 +97,9 @@ class SmsWorker:
 
     def _process_batch(self) -> None:
         """Fetch and process one batch of due messages."""
+        if not self._ensure_sms_connected():
+            return
+
         with get_db() as db:
             rows = self._fetch_due(db, limit=10)
 
@@ -87,6 +107,57 @@ class SmsWorker:
             if self._stop_event.is_set():
                 return
             self._send_one(row)
+
+    def _ensure_sms_connected(self) -> bool:
+        now = time.monotonic()
+        if now < self._next_device_check_at:
+            return self._sms.is_connected()
+        self._next_device_check_at = now + self.DEVICE_DETECTION_INTERVAL_SECONDS
+
+        device_present = self._sms.is_device_present()
+        if self._sms.is_connected():
+            if device_present:
+                return True
+            try:
+                self._sms.close()
+            except Exception:
+                logger.exception("Could not close disconnected GSM modem")
+            self._report_sms_disconnected(
+                "GSM modem disconnected; queued SMS remain pending"
+            )
+            return False
+
+        if self._wait_for_device_reconnect:
+            if not device_present:
+                self._wait_for_device_reconnect = False
+                logger.info("GSM device removed; waiting for it to reconnect")
+            return False
+        if not device_present:
+            return False
+
+        try:
+            self._sms.open()
+        except Exception as exc:
+            self._wait_for_device_reconnect = True
+            logger.warning(
+                "GSM connection failed; queued SMS remain pending until the modem "
+                "is disconnected and reconnected: %s",
+                exc,
+            )
+            return False
+
+        if not self._sms.is_connected():
+            self._wait_for_device_reconnect = True
+            logger.warning(
+                "GSM open returned without a connection; queued SMS remain pending "
+                "until the modem is disconnected and reconnected"
+            )
+            return False
+
+        logger.info("GSM connection restored; resuming queued SMS delivery")
+        if self._on_connection_changed is not None:
+            self._on_connection_changed(True)
+        return True
 
     def _fetch_due(self, db, limit: int) -> list[SmsQueue]:
         """Fetch messages where status is pending/failed AND next_attempt_at <= now."""
@@ -106,19 +177,88 @@ class SmsWorker:
     # ============================================================
 
     def _send_one(self, row: SmsQueue) -> None:
+        dispatch_started_at = utc_now()
+        attempt = row.attempts + 1
+        try:
+            with get_db() as db:
+                AuditLogRepository.log(
+                    db,
+                    event_type=EVENT_SMS_DISPATCH_STARTED,
+                    payload_json=json.dumps(
+                        {
+                            "alert_id": row.alert_id,
+                            "sms_id": row.id,
+                            "attempt": attempt,
+                            "started_at_utc": dispatch_started_at.isoformat(),
+                        }
+                    ),
+                )
+        except Exception:
+            logger.exception(
+                "Could not record SMS dispatch start for queue item id=%s",
+                row.id,
+            )
+
+        send_started_at = utc_now()
         try:
             result = self._sms.send_sms(row.phone_number, row.message)
         except Exception as exc:
+            response_time_ms = max(
+                0,
+                int((utc_now() - send_started_at).total_seconds() * 1000),
+            )
             logger.exception("SMS send raised for id=%s", row.id)
-            self._mark_failed(row, reason=f"exception: {exc}")
+            self._mark_failed(
+                row,
+                reason=f"exception: {exc}",
+                response_time_ms=response_time_ms,
+                send_started_at=send_started_at,
+            )
+            if not self._sms.is_connected():
+                self._report_sms_disconnected(
+                    "GSM modem connection was lost during SMS delivery"
+                )
             return
 
+        response_time_ms = max(
+            0,
+            int((utc_now() - send_started_at).total_seconds() * 1000),
+        )
         if result.success:
-            self._mark_sent(row, raw=result.raw_response)
+            self._mark_sent(
+                row,
+                raw=result.raw_response,
+                response_time_ms=response_time_ms,
+                send_started_at=send_started_at,
+            )
         else:
-            self._mark_failed(row, reason=result.reason or "unknown")
+            self._mark_failed(
+                row,
+                reason=result.reason or "unknown",
+                response_time_ms=response_time_ms,
+                send_started_at=send_started_at,
+            )
+        if not self._sms.is_connected():
+            self._report_sms_disconnected(
+                "GSM modem connection was lost during SMS delivery"
+            )
 
-    def _mark_sent(self, row: SmsQueue, *, raw: str = "") -> None:
+    def _report_sms_disconnected(self, message: str) -> None:
+        if self._wait_for_device_reconnect:
+            return
+        self._wait_for_device_reconnect = True
+        logger.warning(message)
+        if self._on_connection_changed is not None:
+            self._on_connection_changed(False)
+
+    def _mark_sent(
+        self,
+        row: SmsQueue,
+        *,
+        raw: str = "",
+        response_time_ms: int,
+        send_started_at: datetime,
+    ) -> None:
         now = utc_now()  # aware
         try:
             with get_db() as db:
@@ -130,13 +270,31 @@ class SmsWorker:
                 AuditLogRepository.log(
                     db,
                     event_type=EVENT_SMS_SENT,
-                    payload_json=f'{{"id":{fresh.id},"phone":"{fresh.phone_number}","raw":"{raw[:80]}"}}',
+                    payload_json=json.dumps(
+                        {
+                            "id": fresh.id,
+                            "sms_id": fresh.id,
+                            "alert_id": fresh.alert_id,
+                            "phone": fresh.phone_number,
+                            "attempt": fresh.attempts + 1,
+                            "response_time_ms": response_time_ms,
+                            "send_started_at_utc": send_started_at.isoformat(),
+                            "raw": raw,
+                        }
+                    ),
                 )
             logger.info("SMS sent: id=%s to=%s", row.id, row.phone_number)
         except Exception:
             logger.exception("Failed to mark SMS sent: id=%s", row.id)
 
-    def _mark_failed(self, row: SmsQueue, *, reason: str) -> None:
+    def _mark_failed(
+        self,
+        row: SmsQueue,
+        *,
+        reason: str,
+        response_time_ms: int,
+        send_started_at: datetime,
+    ) -> None:
         now = utc_now()
         try:
             with get_db() as db:
@@ -165,9 +323,17 @@ class SmsWorker:
                 AuditLogRepository.log(
                     db,
                     event_type=EVENT_SMS_FAILED,
-                    payload_json=(
-                        f'{{"id":{fresh.id},"phone":"{fresh.phone_number}",'
-                        f'"reason":"{reason[:80]}","attempts":{fresh.attempts}}}'
+                    payload_json=json.dumps(
+                        {
+                            "id": fresh.id,
+                            "sms_id": fresh.id,
+                            "alert_id": fresh.alert_id,
+                            "phone": fresh.phone_number,
+                            "reason": reason[:255],
+                            "attempt": fresh.attempts,
+                            "response_time_ms": response_time_ms,
+                            "send_started_at_utc": send_started_at.isoformat(),
+                        }
                     ),
                 )
         except Exception:

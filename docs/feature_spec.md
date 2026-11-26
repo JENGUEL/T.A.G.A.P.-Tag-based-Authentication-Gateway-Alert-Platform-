@@ -50,20 +50,21 @@ The system uses **4 RFID cards** per kiosk.
 2. **Card UID looked up in DB** → returns `CardType` and associated `Room`.
 3. **Deduplication check:** same card within 60s → silently rejected, logged.
 4. **UI transitions to Confirmation screen** (color-coded by status).
-5. **3-second countdown** with a **CANCEL** button.
-6. **On confirm (or timeout):**
+5. **3-second confirmation window** with explicit **CONFIRM ALERT** and **CANCEL** buttons.
+6. **Only on explicit confirm:**
    - Fetch all students in the room + their parent names + parent phone numbers.
    - Fetch the school's configured police station number.
    - Build SMS messages from templates (parents → one message per parent; police → one message).
    - Insert all into `sms_queue` table (durable, survives reboot).
    - Log analytics event.
-7. **Background SMS worker polls queue every 2s:**
+7. **On cancel or countdown expiry:** return to Standby without creating an alert or queuing SMS.
+8. **Background SMS worker polls queue every 2s:**
    - Send via GSM (AT commands).
    - Retry 3× with exponential backoff (2s / 4s / 8s) on failure.
-   - Parse `+CMGS:` response to confirm actual delivery.
+   - Treat `+CMGS:` as the modem's submission acknowledgement; it does not confirm parent receipt.
    - Update queue status: `SENT` / `FAILED`.
-   - Log delivery confirmation + failure reason to `audit_logs`.
-8. **UI returns to Standby.**
+   - Log modem acknowledgement + failure reason to `audit_logs`.
+9. **UI returns to Standby.**
 
 ---
 
@@ -173,7 +174,7 @@ Auto-collected on every alert:
 
 - **Kiosk full-screen** — no taskbar, no close button, no window frame.
 - **Standby screen** — logo, drill mode indicator, "Ready to scan", GSM status, listening indicator.
-- **Confirmation screen** — color-coded (green/yellow/red), large countdown ring, CANCEL button, distinct visual per card type.
+- **Confirmation screen** — color-coded (green/yellow/red), large countdown ring, explicit CONFIRM ALERT and CANCEL buttons; expiry performs no operation.
 - **Settings screen** — inspired by Linear/Stripe: sidebar nav, clean typography, card-based layout, subtle animations.
 - **Feedback latency:** every action < 100ms visual response.
 - **Accessibility:** high contrast, tap targets ≥ 44px, readable fonts.
@@ -184,9 +185,11 @@ Auto-collected on every alert:
 
 | Failure | Behavior |
 |---------|----------|
-| GSM offline | Queue SMS, show "Pending — Retrying", log to audit |
+| RFID or GSM unavailable at startup | Explain which hardware is unavailable and ask whether to cancel or continue in degraded mode; do not silently enable mock hardware |
+| GSM offline | Keep SMS queued locally and wait for the configured serial device to be reconnected; attempt one modem handshake, then show a connection confirmation and resume delivery on success |
+| RFID or GSM disconnects during operation | Open a terminal-style recovery dialog showing both device states and disconnect events; let the operator reconnect or continue in degraded mode |
 | GSM send fail | Retry 3× with backoff, then mark FAILED |
-| RFID disconnect | Show "Reader disconnected" indicator; UI stays responsive |
+| RFID offline or disconnected | Show "Reader disconnected" indicator; UI stays responsive, but card scans remain unavailable until reconnected |
 | Power loss | Queue persists in SQLite; resumes on boot |
 | DB corruption | Auto-backup on boot, show admin warning |
 | Duplicate scan | Silent rejection within 60s; log for analytics |
@@ -238,6 +241,22 @@ Auto-collected on every alert:
 | **S6** | Settings screen + admin card flow + PIN |
 | **S7** | Analytics export + reporting |
 | **S8** | Polish, testing, kiosk packaging |
+
+### Research Instrument 1 report outputs
+
+- The Emergency Report screen generates a formal PDF and a matching Excel workbook from one database snapshot.
+- The workbook separates registered RFID cards, RFID scan/confirmation events, alerts, SMS queue records, per-attempt modem results, audit events, analytics, and per-scan latency; its final worksheet is a metric and raw-row reconciliation summary.
+- SMS response time measures the worker's send operation until a modem result. Parent receipt time, modem RSSI, and raw serial byte streams are not captured.
+- Parent phone numbers are masked and card UIDs are replaced with consistent pseudonymous references in the workbook. SMS message text remains available for authorized local review.
+- SMS status counts reflect the queue state at report generation. Lifecycle audit entries for selected alerts may be included even when their timestamps fall outside the selected alert-trigger date range.
+
+### Room roster, cards, and reader access
+
+- The Room Device quick action and Settings expose the same editable student/contact roster. Each saved row updates room students and linked parent contacts, which are used by alert recipient selection.
+- Settings can enroll SAFE, ASSIST, DANGER, and ADMIN cards. Enrollment requires an initial scan, operator confirmation, a second matching scan, and an explicit save. Cards can be disabled or re-enabled.
+- SMS templates are editable in Settings and saved to the database; alert dispatch uses the saved template for the selected card and recipient type.
+- The kiosk Reader Monitor button routes to Settings for initial ADMIN-card enrollment when none is active. Once an ADMIN card is active, Reader Monitor requires that card to be scanned before access.
+- The built-in `CARD-ADMIN-0001` sample is deactivated during seed repair so it cannot satisfy the real ADMIN-card enrollment gate.
 
 ---
 

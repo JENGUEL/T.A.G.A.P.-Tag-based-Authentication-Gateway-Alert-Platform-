@@ -11,6 +11,8 @@ pyserial==3.5
 
 # --- Database ---
 SQLAlchemy==2.0.55
+reportlab==4.4.9
+openpyxl==3.1.5
 
 # --- Configuration ---
 python-dotenv==1.0.1

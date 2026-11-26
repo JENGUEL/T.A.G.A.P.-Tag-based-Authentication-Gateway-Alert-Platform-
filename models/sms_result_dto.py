@@ -39,6 +39,7 @@ class AlertResult:
     alert_id: int | None = None
     sms_queued: int = 0
     scan_ts: datetime | None = None
+    scan_id: str = ""
     error_message: str = ""
 
     @property

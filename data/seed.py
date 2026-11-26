@@ -64,24 +64,37 @@ def seed() -> None:
             room = Room(
                 school_id=school.id,
                 name="Room 201",
+                room_number="201",
+                section="Grade 7 - Section A",
                 wing="North Wing",
                 floor="2nd Floor",
             )
             db.add(room)
             db.flush()
             logger.info("Seeded room: %s", room.name)
+        else:
+            if not room.room_number:
+                room.room_number = (
+                    room.name[5:]
+                    if room.name.lower().startswith("room ")
+                    else room.name
+                )
+            if not room.section:
+                room.section = "Grade 7 - Section A"
 
         # --- Cards ---
         card_uids = {
             CardType.SAFE:   "CARD-SAFE-0001",
             CardType.ASSIST: "CARD-ASSIST-0001",
             CardType.DANGER: "CARD-DANGER-0001",
-            CardType.ADMIN:  "CARD-ADMIN-0001",
         }
         for ctype, uid in card_uids.items():
             if not db.query(Card).filter_by(uid=uid).first():
                 db.add(Card(uid=uid, type=ctype.value, room_id=room.id, active=True))
-        logger.info("Seeded 4 cards for room %s", room.name)
+        demo_admin_card = db.query(Card).filter_by(uid="CARD-ADMIN-0001").first()
+        if demo_admin_card is not None and demo_admin_card.active:
+            demo_admin_card.active = False
+        logger.info("Seeded %d demo alert cards for room %s", len(card_uids), room.name)
 
         # --- Students + Parents ---
         if db.query(Student).filter_by(room_id=room.id).count() == 0:

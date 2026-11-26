@@ -9,20 +9,32 @@ import queue
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from uuid import uuid4
 
-from core.constants import CardType
+from core.constants import (
+    EVENT_ALERT_CANCELLED,
+    EVENT_ALERT_CONFIRMED,
+    EVENT_CONFIRMATION_SHOWN,
+    EVENT_CONFIRMATION_TIMEOUT,
+    EVENT_DEVICE_CONNECTION_CHANGED,
+    EVENT_RFID_SCAN_DETECTED,
+    CardType,
+)
 from models.sms_result_dto import AlertResult, AlertOutcome
 from services.alert_service import AlertService
 from services.rfid_listener import RfidListener
 from services.sms_worker import SmsWorker
 from services import get_rfid_service, get_sms_service, reset_services
 from config import settings
+from data.repositories import CardRepository
 from services.boot_service import get_system_status, run_preflight_checks
 from ui.screens.standby import build_standby_screen
 from ui.screens.confirmation import build_confirmation_screen
 from ui.screens.admin.room_device import build_room_device
 from ui.screens.admin.alert_history import build_alert_history
+from ui.screens.admin.operational_report import build_operational_report
 from ui.screens.admin.reader_monitor import ReaderMonitor
+from ui.screens.admin.shell import set_active_admin_navigation
 from ui.screens.admin.settings import build_settings
 from ui.components.toast import Toast
 from ui.theme import *
@@ -37,6 +49,7 @@ class AppRouter:
         self.clock_ctrl: Optional[ft.Text] = None
         self.room_id: Optional[int] = 1
         self.in_admin_mode = False
+        self.admin_authorized = False
 
         # Reference to the inner content area of the shell
         self.body_host: Optional[ft.Container] = None
@@ -44,9 +57,22 @@ class AppRouter:
         self.reader_monitor: Optional[ReaderMonitor] = None
         self.developer_mode = False
         self.reader_connected = False
+        self.sms_connected = False
+        self.last_room_scan_at: Optional[datetime] = None
+        self.last_room_scan_uid: Optional[str] = None
+        self.room_device_controls: dict[str, ft.Control] = {}
+        self.room_device_scan_test_armed = False
+        self.card_registration_session: Optional[dict[str, object]] = None
+        self.reader_monitor_auth_pending = False
+        self.reader_monitor_auth_dialog: Optional[ft.AlertDialog] = None
+        self.reader_monitor_auth_status: Optional[ft.Text] = None
         self.mode_text_control: Optional[ft.Text] = None
         self.mode_dot_control: Optional[ft.Container] = None
         self.mode_icon_control: Optional[ft.IconButton] = None
+        self.runtime_hardware_dialog: Optional[ft.AlertDialog] = None
+        self.runtime_hardware_log: Optional[ft.Column] = None
+        self.runtime_hardware_status_controls: dict[str, ft.Text] = {}
+        self.runtime_reconnect_in_progress = False
         self.command_field: Optional[ft.TextField] = None
         self.command_suggestions: Optional[ft.Text] = None
         self.console_refresh = None
@@ -80,9 +106,22 @@ class AppRouter:
             self._on_rfid_connection_changed,
         )
         self.reader_connected = self.rfid_listener.rfid.is_connected()
+        self._record_device_connection_change(
+            "RFID reader",
+            self.reader_connected,
+            settings.RFID_PORT,
+        )
         self.rfid_listener.start()
-        self.sms_worker = SmsWorker()
+        self.sms_worker = SmsWorker(
+            on_connection_changed=self._on_sms_connection_changed
+        )
         self.sms_worker.start()
+        self.sms_connected = get_sms_service().is_connected()
+        self._record_device_connection_change(
+            "GSM modem",
+            self.sms_connected,
+            settings.GSM_PORT,
+        )
         self.page.run_task(self._clock_tick_loop)
 
         self.show_standby()
@@ -133,6 +172,7 @@ class AppRouter:
             self.show_reader_monitor,
             self.reader_connected,
             self._register_mode_controls,
+            sms_connected=self.sms_connected,
         )
         self.page.views.append(view)
         self.page.update()
@@ -149,16 +189,592 @@ class AppRouter:
         self._refresh_mode_indicator()
 
     def _on_rfid_connection_changed(self, connected: bool):
+        if self.reader_connected != connected:
+            self._record_device_connection_change(
+                "RFID reader",
+                connected,
+                settings.RFID_PORT,
+            )
         self.reader_connected = connected
+        self._refresh_room_device_controls()
+        if not connected:
+            self.rfid_listener.stop()
+        self.page.run_task(
+            self._apply_runtime_hardware_connection,
+            "RFID reader",
+            connected,
+        )
+
+    def _register_room_device_controls(self, controls: dict[str, ft.Control]):
+        self.room_device_controls = controls
+
+    def _refresh_room_device_controls(self):
+        controls = self.room_device_controls
+        if not controls:
+            return
+
+        connected = self.reader_connected
+        status_text = controls.get("reader_status")
+        if isinstance(status_text, ft.Text):
+            status_text.value = "Reader Connected" if connected else "Reader Disconnected"
+            status_text.color = SUCCESS_GREEN if connected else PRIMARY_RED
+
+        reader_dot = controls.get("reader_dot")
+        if isinstance(reader_dot, ft.Container):
+            reader_dot.bgcolor = SUCCESS_GREEN if connected else PRIMARY_RED
+
+        reader_summary = controls.get("reader_summary")
+        if isinstance(reader_summary, ft.Text):
+            reader_summary.value = (
+                "RFID reader is connected and ready."
+                if connected
+                else "RFID scans are unavailable until the reader reconnects."
+            )
+
+        scan_button = controls.get("scan_test_button")
+        if isinstance(scan_button, ft.Button):
+            scan_button.disabled = not connected
+
+        disconnect_button = controls.get("disconnect_button")
+        if isinstance(disconnect_button, ft.TextButton):
+            disconnect_button.visible = connected
+        reconnect_button = controls.get("reconnect_button")
+        if isinstance(reconnect_button, ft.TextButton):
+            reconnect_button.visible = not connected
+
+        emergency_status = controls.get("emergency_status")
+        if isinstance(emergency_status, ft.Text):
+            emergency_status.value = (
+                "No active emergency. RFID listener is ready."
+                if connected
+                else "RFID reader is offline. Cards will not be processed."
+            )
+            emergency_status.color = INK
+
+        try:
+            self.page.update()
+        except RuntimeError:
+            self.room_device_controls = {}
+
+    def _start_room_device_scan_test(self):
+        if not self.reader_connected:
+            Toast.show(self.page, "Connect the RFID reader before starting a scan test.", "warning")
+            return
+
+        self.room_device_scan_test_armed = not self.room_device_scan_test_armed
+        test_status = self.room_device_controls.get("scan_test_status")
+        if isinstance(test_status, ft.Text):
+            test_status.value = (
+                "Waiting for a card - no alert will be sent"
+                if self.room_device_scan_test_armed
+                else "Ready"
+            )
+            test_status.color = WARNING_YELLOW if self.room_device_scan_test_armed else MUTED
+            test_status.update()
+        Toast.show(
+            self.page,
+            "Tap a card to test the reader. This will not send an alert."
+            if self.room_device_scan_test_armed
+            else "Scan test cancelled.",
+            "info",
+        )
+
+    def _record_room_device_scan(self, uid: str):
+        self.last_room_scan_at = datetime.now()
+        self.last_room_scan_uid = uid
+        last_scan = self.room_device_controls.get("last_scan")
+        if isinstance(last_scan, ft.Text):
+            last_scan.value = self.last_room_scan_at.strftime("%Y-%m-%d %H:%M:%S")
+        last_uid = self.room_device_controls.get("last_uid")
+        if isinstance(last_uid, ft.Text):
+            last_uid.value = uid
+        if self.room_device_scan_test_armed:
+            self.room_device_scan_test_armed = False
+            test_status = self.room_device_controls.get("scan_test_status")
+            if isinstance(test_status, ft.Text):
+                test_status.value = f"Read UID {uid}"
+                test_status.color = SUCCESS_GREEN
+            Toast.show(
+                self.page,
+                f"RFID scan test passed. UID: {uid}",
+                "success",
+            )
+        try:
+            self.page.update()
+        except RuntimeError:
+            self.room_device_controls = {}
+
+    async def _restart_room_device_reader(self):
+        await self._connect_room_device_reader(restart=True)
+
+    async def _reconnect_room_device_reader(self):
+        await self._connect_room_device_reader(restart=False)
+
+    async def _connect_room_device_reader(self, *, restart: bool):
+        self.rfid_listener.stop()
+        await asyncio.sleep(0.6)
+        rfid = get_rfid_service()
+        try:
+            if restart:
+                await asyncio.to_thread(rfid.close)
+            await asyncio.to_thread(rfid.open)
+        except Exception as exc:
+            logger.exception("Could not reconnect RFID reader")
+            self.reader_connected = rfid.is_connected()
+            self._refresh_room_device_controls()
+            Toast.show(self.page, f"RFID connection failed: {exc}", "error")
+            if not self.reader_connected:
+                self.page.run_task(
+                    self._apply_runtime_hardware_connection,
+                    "RFID reader",
+                    False,
+                )
+            return
+
+        self.reader_connected = rfid.is_connected()
+        if self.reader_connected:
+            self.rfid_listener.rfid = rfid
+            self.rfid_listener.start()
+            self._refresh_room_device_controls()
+            self._refresh_mode_indicator()
+            Toast.show(
+                self.page,
+                "RFID reader restarted and is ready." if restart else "RFID reader connected.",
+                "success",
+            )
+        else:
+            self._refresh_room_device_controls()
+            Toast.show(self.page, "Reader did not complete its connection handshake.", "error")
+
+    async def _disconnect_room_device_reader(self):
+        decision = asyncio.get_running_loop().create_future()
+
+        def choose(disconnect: bool):
+            if not decision.done():
+                self.page.pop_dialog()
+                decision.set_result(disconnect)
+
+        self.page.show_dialog(
+            ft.AlertDialog(
+                modal=True,
+                title=ft.Text("Disconnect RFID Reader?", weight=ft.FontWeight.BOLD),
+                content=ft.Text(
+                    "Card scans will be unavailable until the reader is reconnected.",
+                    size=12,
+                ),
+                actions=[
+                    ft.TextButton(content="Cancel", on_click=lambda _: choose(False)),
+                    ft.Button(
+                        content="Disconnect",
+                        on_click=lambda _: choose(True),
+                    ),
+                ],
+            )
+        )
+        if not await decision:
+            return
+
+        self.rfid_listener.stop()
+        await asyncio.sleep(0.6)
+        try:
+            await asyncio.to_thread(get_rfid_service().close)
+        except Exception as exc:
+            logger.exception("Could not disconnect RFID reader")
+            Toast.show(self.page, f"Could not disconnect reader: {exc}", "error")
+            return
+        self.reader_connected = False
+        self._refresh_room_device_controls()
         self._refresh_mode_indicator()
+        Toast.show(self.page, "RFID reader disconnected by operator.", "warning")
+
+    async def _show_room_device_diagnostics(self):
+        rfid = get_rfid_service()
+        try:
+            present = await asyncio.to_thread(rfid.is_device_present)
+        except Exception as exc:
+            logger.exception("RFID device diagnostics failed")
+            Toast.show(self.page, f"Device check failed: {exc}", "error")
+            return
+
+        state = "CONNECTED" if rfid.is_connected() else "DISCONNECTED"
+        presence = "DETECTED" if present else "NOT DETECTED"
+        mode = "SIMULATION" if settings.USE_MOCK_RFID else "REAL HARDWARE"
+        lines = [
+            f"[INFO] Operating mode: {mode}",
+            f"[{'OK' if present else 'FAIL'}] Configured port {settings.RFID_PORT}: {presence}",
+            f"[{'OK' if rfid.is_connected() else 'FAIL'}] Serial handle: {state}",
+            f"[INFO] Baud rate: {settings.RFID_BAUDRATE}",
+            f"[INFO] Last scanned UID: {self.last_room_scan_uid or 'None'}",
+        ]
+        self.page.show_dialog(
+            ft.AlertDialog(
+                modal=True,
+                title=ft.Row(
+                    spacing=8,
+                    controls=[
+                        ft.Icon(ft.Icons.TERMINAL_ROUNDED, color="#3976D8"),
+                        ft.Text("RFID Device Diagnostics", weight=ft.FontWeight.BOLD),
+                    ],
+                ),
+                content=ft.Container(
+                    width=520,
+                    padding=12,
+                    bgcolor="#15191E",
+                    border_radius=8,
+                    content=ft.Column(
+                        tight=True,
+                        spacing=7,
+                        controls=[
+                            ft.Text(line, size=11, color="#B8CDF5", font_family="Consolas")
+                            for line in lines
+                        ],
+                    ),
+                ),
+                actions=[
+                    ft.TextButton(content="Close", on_click=lambda _: self.page.pop_dialog())
+                ],
+            )
+        )
+
+    def _on_sms_connection_changed(self, connected: bool):
+        self.page.run_task(self._apply_sms_connection_changed, connected)
+
+    async def _apply_sms_connection_changed(self, connected: bool):
+        if self.sms_connected != connected:
+            self._record_device_connection_change(
+                "GSM modem",
+                connected,
+                settings.GSM_PORT,
+            )
+        self.sms_connected = connected
+        dialog_was_open = self.runtime_hardware_dialog is not None
+        completed = await self._apply_runtime_hardware_connection(
+            "GSM modem",
+            connected,
+        )
+        if connected and not dialog_was_open and not completed:
+            Toast.show(
+                self.page,
+                "GSM modem connected. Queued SMS delivery has resumed.",
+                "success",
+            )
+
+    async def _apply_runtime_hardware_connection(
+        self,
+        device_label: str,
+        connected: bool,
+    ) -> bool:
+        self._refresh_mode_indicator()
+        if not connected:
+            self._show_runtime_hardware_dialog(device_label)
+            return False
+
+        if self.runtime_hardware_dialog is None:
+            return False
+
+        self._refresh_runtime_hardware_dialog()
+        self._append_runtime_hardware_log(f"[CONNECTED] {device_label}", SUCCESS_GREEN)
+        if self.reader_connected and self.sms_connected:
+            self._close_runtime_hardware_dialog()
+            Toast.show(self.page, "All real hardware devices are reconnected.", "success")
+            return True
+        return False
+
+    def _record_device_connection_change(
+        self,
+        device: str,
+        connected: bool,
+        port: str,
+    ) -> None:
+        mock_mode = (
+            settings.USE_MOCK_RFID
+            if device == "RFID reader"
+            else settings.USE_MOCK_SMS
+        )
+        AlertService.record_operational_event(
+            EVENT_DEVICE_CONNECTION_CHANGED,
+            {
+                "room_id": self.room_id or 1,
+                "device": device,
+                "connected": connected,
+                "port": port,
+                "mode": "SIMULATION" if mock_mode else "REAL HARDWARE",
+            },
+        )
+
+    def _show_runtime_hardware_dialog(self, disconnected_device: str):
+        if self.runtime_hardware_dialog is not None:
+            self._refresh_runtime_hardware_dialog()
+            for key, label, port in (
+                ("rfid", "RFID reader", settings.RFID_PORT),
+                ("gsm", "GSM modem", settings.GSM_PORT),
+            ):
+                is_connected = self.reader_connected if key == "rfid" else self.sms_connected
+                self._append_runtime_hardware_log(
+                    f"[{'CONNECTED' if is_connected else 'DISCONNECTED'}] "
+                    f"{label} ({port})",
+                    SUCCESS_GREEN if is_connected else PRIMARY_RED,
+                )
+            self._append_runtime_hardware_log(
+                f"[EVENT] {disconnected_device} disconnected during operation",
+                PRIMARY_RED,
+            )
+            return
+
+        self.runtime_hardware_log = ft.Column(
+            height=130,
+            scroll=ft.ScrollMode.ADAPTIVE,
+            auto_scroll=True,
+            spacing=4,
+            controls=[],
+        )
+        status_rows = []
+        for key, label, port in (
+            ("rfid", "RFID reader", settings.RFID_PORT),
+            ("gsm", "GSM modem", settings.GSM_PORT),
+        ):
+            is_connected = self.reader_connected if key == "rfid" else self.sms_connected
+            state_text = ft.Text(
+                "CONNECTED" if is_connected else "DISCONNECTED",
+                size=10,
+                weight=ft.FontWeight.BOLD,
+                color=SUCCESS_GREEN if is_connected else PRIMARY_RED,
+                font_family="Consolas",
+            )
+            self.runtime_hardware_status_controls[key] = state_text
+            status_rows.append(
+                ft.Container(
+                    padding=8,
+                    bgcolor="#FFFFFF",
+                    border=ft.Border.all(1, "#E7EDF5"),
+                    border_radius=8,
+                    content=ft.Row(
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                        controls=[
+                            ft.Text(f"{label} ({port})", size=11, color=INK),
+                            state_text,
+                        ],
+                    ),
+                )
+            )
+
+        terminal = ft.Container(
+            height=150,
+            padding=10,
+            bgcolor="#0B1010",
+            border_radius=8,
+            content=self.runtime_hardware_log,
+        )
+        self.runtime_hardware_dialog = ft.AlertDialog(
+            modal=True,
+            bgcolor="#F8FAFD",
+            title=ft.Row(
+                tight=True,
+                spacing=8,
+                controls=[
+                    ft.Icon(ft.Icons.WARNING_AMBER_ROUNDED, color=PRIMARY_RED),
+                    ft.Text(
+                        "Hardware connection lost",
+                        size=17,
+                        weight=ft.FontWeight.BOLD,
+                        color="#1F2A44",
+                    ),
+                ],
+            ),
+            content=ft.Container(
+                width=560,
+                content=ft.Column(
+                    tight=True,
+                    spacing=9,
+                    controls=[
+                        ft.Text(
+                            "A device disconnected during operation. Review both device states.",
+                            size=11,
+                            color=MUTED,
+                        ),
+                        *status_rows,
+                        ft.Text("Connection terminal", size=10, color=MUTED),
+                        terminal,
+                    ],
+                ),
+            ),
+            actions=[
+                ft.TextButton(
+                    content="Continue in degraded mode",
+                    on_click=lambda _: self.page.run_task(
+                        self._continue_runtime_hardware_dialog
+                    ),
+                ),
+                ft.Button(
+                    content="Reconnect",
+                    bgcolor="#3976D8",
+                    color=ft.Colors.WHITE,
+                    on_click=lambda _: self.page.run_task(
+                        self._reconnect_runtime_hardware
+                    ),
+                ),
+            ],
+        )
+        for key, label, port in (
+            ("rfid", "RFID reader", settings.RFID_PORT),
+            ("gsm", "GSM modem", settings.GSM_PORT),
+        ):
+            is_connected = self.reader_connected if key == "rfid" else self.sms_connected
+            self._append_runtime_hardware_log(
+                f"[{'CONNECTED' if is_connected else 'DISCONNECTED'}] "
+                f"{label} ({port})",
+                SUCCESS_GREEN if is_connected else PRIMARY_RED,
+            )
+        self._append_runtime_hardware_log(
+            f"[EVENT] {disconnected_device} disconnected during operation",
+            PRIMARY_RED,
+        )
+        self.page.show_dialog(self.runtime_hardware_dialog)
+        self._refresh_runtime_hardware_dialog()
+
+    def _refresh_runtime_hardware_dialog(self):
+        states = {
+            "rfid": self.reader_connected,
+            "gsm": self.sms_connected,
+        }
+        for key, connected in states.items():
+            state_text = self.runtime_hardware_status_controls.get(key)
+            if state_text is not None:
+                state_text.value = "CONNECTED" if connected else "DISCONNECTED"
+                state_text.color = SUCCESS_GREEN if connected else PRIMARY_RED
+        if self.runtime_hardware_dialog is not None:
+            self.page.update()
+
+    def _append_runtime_hardware_log(self, text: str, color: str):
+        if self.runtime_hardware_log is None:
+            return
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.runtime_hardware_log.controls.append(
+            ft.Text(
+                f"[{timestamp}] {text}",
+                size=10,
+                color=color,
+                font_family="Consolas",
+            )
+        )
+        if len(self.runtime_hardware_log.controls) > 30:
+            self.runtime_hardware_log.controls.pop(0)
+        try:
+            self.runtime_hardware_log.update()
+        except RuntimeError:
+            pass
+
+    async def _continue_runtime_hardware_dialog(self):
+        self._append_runtime_hardware_log(
+            "[WARN] Continuing with the unavailable device(s)",
+            WARNING_YELLOW,
+        )
+        self._close_runtime_hardware_dialog()
+        Toast.show(
+            self.page,
+            "Continuing in degraded mode. Missing hardware functions remain unavailable.",
+            "warning",
+        )
+
+    async def _reconnect_runtime_hardware(self):
+        if self.runtime_reconnect_in_progress:
+            return
+        self.runtime_reconnect_in_progress = True
+        try:
+            self._append_runtime_hardware_log(
+                "[INFO] Reconnecting missing devices...",
+                "#3976D8",
+            )
+            self.rfid_listener.stop()
+            await asyncio.sleep(0.6)
+            await asyncio.to_thread(self.sms_worker.stop)
+
+            rfid = self.rfid_listener.rfid
+            sms = get_sms_service()
+            devices = []
+            if not self.reader_connected:
+                devices.append(("RFID reader", rfid))
+            if not self.sms_connected:
+                devices.append(("GSM modem", sms))
+
+            results = await asyncio.gather(
+                *[asyncio.to_thread(service.open) for _, service in devices],
+                return_exceptions=True,
+            )
+            for (label, _), result in zip(devices, results):
+                if isinstance(result, Exception):
+                    self._append_runtime_hardware_log(
+                        f"[ERROR] {label}: {result}",
+                        PRIMARY_RED,
+                    )
+                else:
+                    self._append_runtime_hardware_log(
+                        f"[CONNECTED] {label}",
+                        SUCCESS_GREEN,
+                    )
+
+            self.reader_connected = rfid.is_connected()
+            self.sms_connected = sms.is_connected()
+            if self.reader_connected:
+                self.rfid_listener.rfid = rfid
+                self.rfid_listener.start()
+            self.sms_worker = SmsWorker(
+                sms_service=sms,
+                wait_for_device_reconnect=not self.sms_connected,
+                on_connection_changed=self._on_sms_connection_changed,
+            )
+            self.sms_worker.start()
+            self._refresh_runtime_hardware_dialog()
+            self._refresh_mode_indicator()
+
+            if self.reader_connected and self.sms_connected:
+                self._close_runtime_hardware_dialog()
+                Toast.show(
+                    self.page,
+                    "All real hardware devices are reconnected.",
+                    "success",
+                )
+            else:
+                self._append_runtime_hardware_log(
+                    "[WARN] Missing devices remain offline. Retry or continue in degraded mode.",
+                    WARNING_YELLOW,
+                )
+        except Exception as exc:
+            logger.exception("Runtime hardware reconnect failed")
+            self._append_runtime_hardware_log(
+                f"[ERROR] Reconnect could not complete: {exc}",
+                PRIMARY_RED,
+            )
+            if not self.sms_worker.is_running:
+                self.sms_worker.start()
+        finally:
+            self.runtime_reconnect_in_progress = False
+
+    def _close_runtime_hardware_dialog(self):
+        if self.runtime_hardware_dialog is None:
+            return
+        self.page.pop_dialog()
+        self.runtime_hardware_dialog = None
+        self.runtime_hardware_log = None
+        self.runtime_hardware_status_controls = {}
 
     def _refresh_mode_indicator(self):
         if self.developer_mode:
             label, color = "DEVELOPER MODE", "#3976D8"
         elif settings.USE_MOCK_RFID:
-            label, color = "SIMULATION MODE", WARNING_YELLOW
+            label, color = (
+                ("SIMULATION MODE", WARNING_YELLOW)
+                if settings.USE_MOCK_SMS
+                else ("MIXED MODE", WARNING_YELLOW)
+            )
+        elif settings.USE_MOCK_SMS:
+            label, color = "MIXED MODE", WARNING_YELLOW
         elif self.reader_connected:
-            label, color = "REAL RFID", SUCCESS_GREEN
+            label, color = (
+                ("REAL HARDWARE", SUCCESS_GREEN)
+                if self.sms_connected
+                else ("DEGRADED MODE", WARNING_YELLOW)
+            )
         else:
             label, color = "READER OFFLINE", PRIMARY_RED
 
@@ -822,12 +1438,82 @@ class AppRouter:
         if self.console_refresh:
             self.console_refresh(update_page=True)
 
+    async def _confirm_degraded_hardware_mode(self, failures: list[str]) -> bool:
+        decision = asyncio.get_running_loop().create_future()
+
+        def choose(continue_mode: bool):
+            if decision.done():
+                return
+            self.page.pop_dialog()
+            decision.set_result(continue_mode)
+
+        dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Row(
+                tight=True,
+                spacing=8,
+                controls=[
+                    ft.Icon(ft.Icons.WARNING_AMBER_ROUNDED, color=WARNING_YELLOW),
+                    ft.Text("Some hardware is unavailable", size=18, weight=ft.FontWeight.BOLD),
+                ],
+            ),
+            content=ft.Container(
+                width=520,
+                content=ft.Column(
+                    tight=True,
+                    spacing=10,
+                    controls=[
+                        ft.Text(
+                            "Real hardware mode cannot use every device right now:",
+                            size=12,
+                            color=INK,
+                        ),
+                        *[
+                            ft.Container(
+                                padding=10,
+                                bgcolor="#FFF4D6",
+                                border_radius=8,
+                                content=ft.Text(f"• {failure}", size=11, color="#8A5A00"),
+                            )
+                            for failure in failures
+                        ],
+                        ft.Text(
+                            "If RFID is offline, cards cannot be scanned until it reconnects. "
+                            "If GSM is offline, alerts remain queued locally and sending retries "
+                            "when the modem reconnects.",
+                            size=11,
+                            color=MUTED,
+                        ),
+                        ft.Text(
+                            "Continue in degraded real-hardware mode?",
+                            size=12,
+                            weight=ft.FontWeight.BOLD,
+                            color=INK,
+                        ),
+                    ],
+                ),
+            ),
+            actions=[
+                ft.TextButton(
+                    content="Cancel",
+                    on_click=lambda _: choose(False),
+                ),
+                ft.TextButton(
+                    content="Continue with unavailable device",
+                    on_click=lambda _: choose(True),
+                ),
+            ],
+        )
+        self.page.show_dialog(dialog)
+        return await decision
+
     async def _run_terminal_hardware_mode(self, output: ft.Column, enable: bool):
         desired = "Developer Mode" if enable else "Real Hardware Mode"
         self._terminal_output(output, f"Activating {desired}...", "#3976D8")
         self._terminal_output(output, "Waiting for RFID and GSM services to switch...")
         previous_rfid_mock = settings.USE_MOCK_RFID
         previous_sms_mock = settings.USE_MOCK_SMS
+        previous_developer_mode = self.developer_mode
         self.rfid_listener.stop()
         await asyncio.sleep(0.6)
         await asyncio.to_thread(self.sms_worker.stop)
@@ -838,34 +1524,105 @@ class AppRouter:
             settings.USE_MOCK_SMS = enable
             rfid = get_rfid_service()
             sms = get_sms_service()
-            await asyncio.gather(
+            open_results = await asyncio.gather(
                 asyncio.to_thread(rfid.open),
                 asyncio.to_thread(sms.open),
+                return_exceptions=True,
             )
+            failures = [
+                f"{label}: {result}"
+                for label, result in zip(("RFID reader", "GSM modem"), open_results)
+                if isinstance(result, Exception)
+            ]
+
+            if failures and enable:
+                raise RuntimeError("; ".join(failures))
+
+            if failures:
+                for failure in failures:
+                    self._terminal_output(output, f"[WARN] {failure}", "#C48A18")
+                if not await self._confirm_degraded_hardware_mode(failures):
+                    self._terminal_output(
+                        output,
+                        "[CANCELLED] Staying in the previous operating mode.",
+                        "#C48A18",
+                    )
+                    settings.USE_MOCK_RFID = previous_rfid_mock
+                    settings.USE_MOCK_SMS = previous_sms_mock
+                    await asyncio.to_thread(reset_services)
+                    restored_rfid = get_rfid_service()
+                    restored_sms = get_sms_service()
+                    restore_results = await asyncio.gather(
+                        asyncio.to_thread(restored_rfid.open),
+                        asyncio.to_thread(restored_sms.open),
+                        return_exceptions=True,
+                    )
+                    for label, restore_result in zip(
+                        ("RFID", "GSM"), restore_results
+                    ):
+                        if isinstance(restore_result, Exception):
+                            self._terminal_output(
+                                output,
+                                f"[WARN] Could not restore {label}: {restore_result}",
+                                "#C2414B",
+                            )
+                    self.reader_connected = restored_rfid.is_connected()
+                    self.sms_connected = restored_sms.is_connected()
+                    self.rfid_listener.rfid = restored_rfid
+                    self.rfid_listener.is_running = True
+                    self.rfid_listener.start()
+                    self.sms_worker = SmsWorker(
+                        sms_service=restored_sms,
+                        wait_for_device_reconnect=not self.sms_connected,
+                        on_connection_changed=self._on_sms_connection_changed,
+                    )
+                    self.sms_worker.start()
+                    self.developer_mode = previous_developer_mode
+                    if self.console_refresh:
+                        self.console_refresh(update_page=True)
+                    return
+
+                self._terminal_output(
+                    output,
+                    "[DEGRADED] Continuing; unavailable hardware will remain offline.",
+                    "#C48A18",
+                )
 
             self.reader_connected = rfid.is_connected()
+            self.sms_connected = sms.is_connected()
             self.rfid_listener.rfid = rfid
             self.rfid_listener.is_running = True
             self.rfid_listener.start()
-            self.sms_worker = SmsWorker(sms_service=sms)
+            self.sms_worker = SmsWorker(
+                sms_service=sms,
+                wait_for_device_reconnect=not self.sms_connected,
+                on_connection_changed=self._on_sms_connection_changed,
+            )
             self.sms_worker.start()
             self.developer_mode = enable
 
             self._terminal_output(
                 output,
-                f"[OK] {desired} active. RFID and GSM services are ready.",
-                "#16805D",
+                (
+                    f"[OK] {desired} active. RFID and GSM services are ready."
+                    if not failures
+                    else f"[WARN] {desired} active with {len(failures)} unavailable device(s)."
+                ),
+                "#16805D" if not failures else "#C48A18",
             )
             if self.console_refresh:
                 self.console_refresh(update_page=True)
-            if enable and self.command_console_open and output is self.console_output_control:
+            if self.command_console_open and output is self.console_output_control:
                 await self._force_close_dialog_async(self.console_dialog)
-                logger.info("Command console closed after developer mode activation")
+                logger.info("Command console closed after hardware mode activation")
                 await asyncio.sleep(0.1)
             self.show_standby()
             if enable:
                 self._show_simulation_reminder()
-            Toast.show(self.page, f"{desired} activated", "success")
+            if failures:
+                Toast.show(self.page, "Real hardware mode active with unavailable device(s).", "warning")
+            else:
+                Toast.show(self.page, f"{desired} activated", "success")
         except Exception as exc:
             self._terminal_output(output, f"[ERROR] Could not activate {desired}: {exc}", "#C2414B")
             settings.USE_MOCK_RFID = previous_rfid_mock
@@ -881,7 +1638,12 @@ class AppRouter:
                 self.rfid_listener.rfid = restored_rfid
                 self.rfid_listener.is_running = True
                 self.rfid_listener.start()
-                self.sms_worker = SmsWorker(sms_service=restored_sms)
+                self.sms_connected = restored_sms.is_connected()
+                self.sms_worker = SmsWorker(
+                    sms_service=restored_sms,
+                    wait_for_device_reconnect=not self.sms_connected,
+                    on_connection_changed=self._on_sms_connection_changed,
+                )
                 self.sms_worker.start()
             except Exception as recovery_error:
                 self._terminal_output(
@@ -957,16 +1719,74 @@ class AppRouter:
         self.page.show_dialog(dialog)
 
     def handle_card_scan(self, uid: str):
-        if self.current_alert is not None or self.in_admin_mode:
+        if self.current_alert is not None:
+            return
+        scan_id = uuid4().hex
+        AlertService.record_operational_event(
+            EVENT_RFID_SCAN_DETECTED,
+            {
+                "room_id": self.room_id,
+                "uid": uid,
+                "scan_id": scan_id,
+            },
+        )
+        if self.reader_monitor_auth_pending:
+            try:
+                is_admin = CardRepository.is_active_admin_uid(self.room_id or 1, uid)
+            except Exception:
+                logger.exception("Could not verify scanned admin card")
+                if self.reader_monitor_auth_status is not None:
+                    self.reader_monitor_auth_status.value = (
+                        "Card verification failed. Check the database and try again."
+                    )
+                    self.reader_monitor_auth_status.color = PRIMARY_RED
+                    self.page.update()
+                return
+            if is_admin:
+                self.reader_monitor_auth_pending = False
+                self.reader_monitor_auth_dialog = None
+                self.reader_monitor_auth_status = None
+                self.admin_authorized = True
+                self.page.pop_dialog()
+                self.show_admin("Reader Monitor")
+            elif self.reader_monitor_auth_status is not None:
+                self.reader_monitor_auth_status.value = (
+                    "That card is not an active admin card. Scan an authorized admin card."
+                )
+                self.reader_monitor_auth_status.color = PRIMARY_RED
+                self.page.update()
             return
 
-        result = AlertService.scan_card(uid)
+        if self.card_registration_session is not None:
+            self._handle_card_registration_scan(uid)
+            return
+
+        if self.in_admin_mode:
+            if self.current_admin_section == "Room Device":
+                self._record_room_device_scan(uid)
+            return
+
+        if (
+            uid == "CARD-ADMIN-0001"
+            and settings.USE_MOCK_RFID
+            and not CardRepository.has_active_admin_card(self.room_id or 1)
+        ):
+            Toast.show(self.page, "Open Settings to register your first admin card.", "warning")
+            self.show_admin("Settings")
+            return
+
+        result = AlertService.scan_card(
+            uid,
+            scan_id=scan_id,
+            kiosk_room_id=self.room_id,
+        )
 
         if result.outcome == AlertOutcome.NEEDS_CONFIRMATION:
             self.current_alert = result
             self.show_confirmation(result)
         elif result.outcome == AlertOutcome.ADMIN_ACCESS:
             self.room_id = result.room_id or 1
+            self.admin_authorized = True
             self.show_admin("Room Device")
         elif result.outcome == AlertOutcome.REJECTED_DUPLICATE:
             Toast.show(self.page, "Card already scanned. Please wait.", "warning")
@@ -979,7 +1799,19 @@ class AppRouter:
         self.page.views.clear()
 
         def on_confirm():
-            exec_result = AlertService.execute_alert(result.card_uid, result.scan_ts)
+            AlertService.record_operational_event(
+                EVENT_ALERT_CONFIRMED,
+                {
+                    "room_id": result.room_id,
+                    "card_type": result.card_type.value if result.card_type else "",
+                    "scan_id": result.scan_id,
+                },
+            )
+            exec_result = AlertService.execute_alert(
+                result.card_uid,
+                result.scan_ts,
+                scan_id=result.scan_id,
+            )
             if exec_result.outcome == AlertOutcome.ERROR:
                 Toast.show(self.page, f"Error: {exec_result.error_message}", "error")
             else:
@@ -989,6 +1821,14 @@ class AppRouter:
             self.show_standby()
 
         def on_cancel():
+            AlertService.record_operational_event(
+                EVENT_ALERT_CANCELLED,
+                {
+                    "room_id": result.room_id,
+                    "card_type": result.card_type.value if result.card_type else "",
+                    "scan_id": result.scan_id,
+                },
+            )
             if hasattr(self.page, "countdown_task") and self.page.countdown_task:
                 self.page.countdown_task.cancel()
             Toast.show(self.page, "Alert cancelled. No messages were sent.", "warning")
@@ -996,7 +1836,45 @@ class AppRouter:
             self.rfid_listener.start()
             self.show_standby()
 
-        self.page.views.append(build_confirmation_screen(self.page, result, on_confirm, on_cancel))
+        def on_timeout():
+            AlertService.record_operational_event(
+                EVENT_CONFIRMATION_TIMEOUT,
+                {
+                    "room_id": result.room_id,
+                    "card_type": result.card_type.value if result.card_type else "",
+                    "scan_id": result.scan_id,
+                },
+            )
+            logger.info(
+                "Confirmation timed out for card %s; no alert or SMS queued",
+                result.card_uid,
+            )
+            self.current_alert = None
+            self.rfid_listener.start()
+            self.show_standby()
+            Toast.show(
+                self.page,
+                "Confirmation timed out. No alert was sent.",
+                "warning",
+            )
+
+        self.page.views.append(
+            build_confirmation_screen(
+                self.page,
+                result,
+                on_confirm,
+                on_cancel,
+                on_timeout,
+            )
+        )
+        AlertService.record_operational_event(
+            EVENT_CONFIRMATION_SHOWN,
+            {
+                "room_id": result.room_id,
+                "card_type": result.card_type.value if result.card_type else "",
+                "scan_id": result.scan_id,
+            },
+        )
         self.page.update()
 
     # ==========================================
@@ -1007,6 +1885,9 @@ class AppRouter:
         self.in_admin_mode = True
         self.rfid_listener.stop()
         self._stop_standby_animations()
+        self.room_device_scan_test_armed = False
+        if section != "Room Device":
+            self.room_device_controls = {}
 
         if hasattr(self.page, "countdown_task") and self.page.countdown_task:
             try:
@@ -1017,29 +1898,249 @@ class AppRouter:
         # Build the initial view (returns a View with the shell + content)
         view = self._build_view(section)
 
-        # Extract the body_host from the view structure:
-        # view.controls[0] -> Row
-        # Row.controls[1] -> Column
-        # Column.controls[1] -> Container (content area)
-        try:
-            self.body_host = view.controls[0].controls[1].controls[1]
-        except (AttributeError, IndexError):
-            self.body_host = None
-
+        self.body_host = self._admin_body_host(view)
         self.current_admin_section = section
         self.page.views.clear()
         self.page.views.append(view)
         self.page.update()
+        if section in ("Room Device", "Settings"):
+            self.page.run_task(self._start_room_device_listener)
+
+    @staticmethod
+    def _admin_body_host(view: ft.View) -> Optional[ft.Container]:
+        try:
+            return view.controls[0].controls[1].controls[1]
+        except (AttributeError, IndexError):
+            return None
+
+    async def _start_room_device_listener(self):
+        await asyncio.sleep(0.6)
+        if (
+            self.in_admin_mode
+            and self.current_admin_section in ("Room Device", "Settings")
+            and self.reader_monitor is None
+            and not self.rfid_listener.is_running
+        ):
+            self.rfid_listener.start()
 
     def show_reader_monitor(self):
-        self.show_admin("Reader Monitor")
+        room_id = self.room_id or 1
+        try:
+            has_admin_card = CardRepository.has_active_admin_card(room_id)
+        except Exception as exc:
+            logger.exception("Could not verify reader-monitor admin access")
+            Toast.show(self.page, f"Could not verify admin card: {exc}", "error")
+            return
+
+        if not has_admin_card:
+            Toast.show(
+                self.page,
+                "No admin card is registered. Settings opened for first-time enrollment.",
+                "warning",
+            )
+            self.show_admin("Settings")
+            return
+
+        self.reader_monitor_auth_pending = True
+        self.reader_monitor_auth_status = ft.Text(
+            "Scan an active ADMIN card to open Reader Monitor.",
+            size=11,
+            color=MUTED,
+        )
+
+        def cancel(_event=None) -> None:
+            self.reader_monitor_auth_pending = False
+            self.reader_monitor_auth_dialog = None
+            self.reader_monitor_auth_status = None
+            self.page.pop_dialog()
+            if self.in_admin_mode and self.page.views:
+                set_active_admin_navigation(
+                    self.page.views[-1],
+                    self.current_admin_section,
+                )
+
+        self.reader_monitor_auth_dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Admin verification", weight=ft.FontWeight.BOLD),
+            content=ft.Container(
+                width=380,
+                content=ft.Column(
+                    tight=True,
+                    spacing=10,
+                    controls=[
+                        ft.Icon(ft.Icons.ADMIN_PANEL_SETTINGS, size=34, color=PRIMARY_RED),
+                        self.reader_monitor_auth_status,
+                    ],
+                ),
+            ),
+            actions=[
+                ft.TextButton(content="Cancel", on_click=cancel),
+            ],
+        )
+        self.page.show_dialog(self.reader_monitor_auth_dialog)
+
+    def _begin_card_registration(self, card_type_value: str) -> None:
+        if not self.in_admin_mode or self.current_admin_section != "Settings":
+            Toast.show(self.page, "Open Settings before registering a card.", "warning")
+            return
+        try:
+            card_type = CardType(card_type_value)
+        except ValueError:
+            Toast.show(self.page, f"Unsupported card type: {card_type_value}", "error")
+            return
+
+        status = ft.Text(
+            f"Scan the card to register as {card_type.value}.",
+            size=11,
+            color=INK,
+        )
+        dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text(f"Register {card_type.value.title()} Card", weight=ft.FontWeight.BOLD),
+            content=ft.Container(
+                width=420,
+                content=ft.Column(
+                    tight=True,
+                    spacing=10,
+                    controls=[
+                        ft.Row(
+                            spacing=8,
+                            controls=[
+                                ft.Icon(ft.Icons.CONTACTLESS, color=PRIMARY_RED),
+                                ft.Text(
+                                    "Card enrollment · Step 1 of 3",
+                                    size=11,
+                                    weight=ft.FontWeight.W_600,
+                                    color=MUTED,
+                                ),
+                            ],
+                        ),
+                        status,
+                    ],
+                ),
+            ),
+            actions=[
+                ft.TextButton(
+                    content="Cancel",
+                    on_click=lambda _: self._cancel_card_registration(),
+                )
+            ],
+        )
+        self.card_registration_session = {
+            "card_type": card_type,
+            "stage": "scan_first",
+            "first_uid": None,
+            "status": status,
+            "dialog": dialog,
+        }
+        self.page.show_dialog(dialog)
+
+    def _cancel_card_registration(self) -> None:
+        self.card_registration_session = None
+        self.page.pop_dialog()
+
+    def _handle_card_registration_scan(self, uid: str) -> None:
+        session = self.card_registration_session
+        if session is None:
+            return
+
+        status = session["status"]
+        dialog = session["dialog"]
+        stage = str(session["stage"])
+        if stage == "scan_first":
+            session["first_uid"] = uid
+            session["stage"] = "confirm_first"
+            status.value = (
+                f"Detected UID {uid} for {session['card_type'].value}. Confirm this assignment, "
+                "then scan the same card again."
+            )
+            dialog.content.content.controls[0].controls[1].value = "Card enrollment · Step 2 of 3"
+            dialog.actions = [
+                ft.TextButton(
+                    content="Cancel",
+                    on_click=lambda _: self._cancel_card_registration(),
+                ),
+                ft.Button(
+                    content="Confirm and Scan Again",
+                    on_click=self._confirm_card_registration_scan,
+                ),
+            ]
+        elif stage == "scan_second":
+            if uid != session["first_uid"]:
+                status.value = (
+                    "The second scan did not match. Scan the same card again to continue."
+                )
+                status.color = PRIMARY_RED
+                self.page.update()
+                return
+            session["stage"] = "ready"
+            status.value = (
+                f"Both scans match ({uid}). Review the {session['card_type'].value} assignment "
+                "and save it to the database."
+            )
+            status.color = SUCCESS_GREEN
+            dialog.content.content.controls[0].controls[1].value = "Card enrollment · Step 3 of 3"
+            dialog.actions = [
+                ft.TextButton(
+                    content="Cancel",
+                    on_click=lambda _: self._cancel_card_registration(),
+                ),
+                ft.Button(
+                    content="Save Card",
+                    icon=ft.Icons.SAVE_OUTLINED,
+                    on_click=self._save_registered_card,
+                ),
+            ]
+        self.page.update()
+
+    def _confirm_card_registration_scan(self, _event=None) -> None:
+        session = self.card_registration_session
+        if session is None or session["stage"] != "confirm_first":
+            return
+        session["stage"] = "scan_second"
+        status = session["status"]
+        status.value = "Scan the same card a second time to verify the UID before saving."
+        status.color = INK
+        session["dialog"].content.content.controls[0].controls[1].value = (
+            "Card enrollment · Step 2 of 3"
+        )
+        session["dialog"].actions = [
+            ft.TextButton(
+                content="Cancel",
+                on_click=lambda _: self._cancel_card_registration(),
+            )
+        ]
+        self.page.update()
+
+    async def _save_registered_card(self, _event=None) -> None:
+        session = self.card_registration_session
+        if session is None or session["stage"] != "ready":
+            return
+        try:
+            await asyncio.to_thread(
+                CardRepository.register,
+                self.room_id or 1,
+                str(session["first_uid"]),
+                session["card_type"],
+            )
+        except Exception as exc:
+            logger.exception("Could not register RFID card")
+            Toast.show(self.page, f"Could not register card: {exc}", "error")
+            return
+
+        self.card_registration_session = None
+        self.page.pop_dialog()
+        Toast.show(self.page, "Card registered and saved.", "success")
+        self._refresh_admin_content("Settings")
 
     def _build_view(self, section: str) -> ft.View:
         """Builds the full view (shell + content) for a given section."""
         # Rebuilding the view each time is fine because we swap the body_host,
         # not replace the whole view in page.views
         if section == "Reader Monitor":
-            get_rfid_service().close()
+            rfid = get_rfid_service()
+            rfid.close()
+            self.reader_connected = rfid.is_connected()
             self.reader_monitor = ReaderMonitor(self.page)
             return self.reader_monitor.build(
                 self.room_id or 1, self._navigate_admin, self.exit_admin,
@@ -1049,19 +2150,71 @@ class AppRouter:
             self.reader_monitor = None
         if section == "Alert History":
             return build_alert_history(self.page, self.room_id, self._navigate_admin, self.exit_admin)
+        elif section == "Emergency Report":
+            return build_operational_report(
+                self.page,
+                self.room_id or 1,
+                self._navigate_admin,
+                self.exit_admin,
+            )
         elif section == "Settings":
-            return build_settings(self.page, self.room_id, self._navigate_admin, self.exit_admin)
+            return build_settings(
+                self.page,
+                self.room_id or 1,
+                self._navigate_admin,
+                self.exit_admin,
+                on_register_card=self._begin_card_registration,
+                on_card_updated=lambda: self._refresh_admin_content("Settings"),
+            )
         else:
-            return build_room_device(self.page, self.room_id, self._navigate_admin, self.exit_admin)
+            return build_room_device(
+                self.page,
+                self.room_id,
+                self._navigate_admin,
+                self.exit_admin,
+                reader_connected=self.reader_connected,
+                reader_port=settings.RFID_PORT,
+                last_scan_at=self.last_room_scan_at,
+                last_scan_uid=self.last_room_scan_uid,
+                on_scan_test=self._start_room_device_scan_test,
+                on_restart_reader=self._restart_room_device_reader,
+                on_disconnect_reader=self._disconnect_room_device_reader,
+                on_reconnect_reader=self._reconnect_room_device_reader,
+                on_diagnostics=self._show_room_device_diagnostics,
+                on_room_updated=lambda: self._refresh_admin_content("Room Device"),
+                register_controls=self._register_room_device_controls,
+            )
+
+    def _refresh_admin_content(self, section: str):
+        if self.body_host is None:
+            logger.error("Cannot refresh %s because the admin content host is missing", section)
+            return
+
+        view = self._build_view(section)
+        body_host = self._admin_body_host(view)
+        if body_host is None:
+            logger.error("Cannot refresh %s because its content host could not be built", section)
+            return
+
+        self.body_host.content = body_host.content
+        self.current_admin_section = section
+        self.page.update()
 
     def _navigate_admin(self, section: str):
         if section == "Main Kiosk":
             self.exit_admin()
             return
+        if section == "Reader Monitor" and not self.admin_authorized:
+            self.show_reader_monitor()
+            return
 
         # If section is the same as current, do nothing
         if section == self.current_admin_section:
             return
+
+        if section not in ("Room Device", "Settings"):
+            self.rfid_listener.stop()
+            self.room_device_scan_test_armed = False
 
         if self.reader_monitor is not None:
             self.reader_monitor.dispose()
@@ -1075,6 +2228,9 @@ class AppRouter:
         self.page.run_task(self._transition_admin, section)
 
     async def _transition_admin(self, section: str):
+        if self.page.views:
+            set_active_admin_navigation(self.page.views[-1], section)
+
         # 1. Fade out current content
         self.body_host.opacity = 0
         self.page.update()
@@ -1091,36 +2247,52 @@ class AppRouter:
         self.page.update()
         await asyncio.sleep(0.1)
 
-        # 4. Build the new view and extract its content
+        # Build the next screen and move only its content into the existing shell.
         new_view = self._build_view(section)
-        try:
-            new_content = new_view.controls[0].controls[1].controls[1].content
-        except (AttributeError, IndexError):
-            new_content = ft.Container()
-
-        # 5. Swap content and fade in
-        self.body_host.content = new_content
-        self.body_host.opacity = 1
+        new_body_host = self._admin_body_host(new_view)
+        self.body_host.content = (
+            new_body_host.content if new_body_host is not None else ft.Container()
+        )
         self.current_admin_section = section
+        if section != "Room Device":
+            self.room_device_controls = {}
         self.page.update()
+        await asyncio.sleep(0.1)
+        self.body_host.opacity = 1
+        self.page.update()
+        if section in ("Room Device", "Settings"):
+            self.page.run_task(self._start_room_device_listener)
 
     def _build_skeleton(self, title: str) -> ft.Control:
-        def block(height: int, width: int = None) -> ft.Container:
-            return ft.Container(height=height, width=width, bgcolor="#EEE9EB", border_radius=8)
-        return ft.Column(expand=True, spacing=16, controls=[
-            ft.Row(tight=True, spacing=10, controls=[
-                ft.ProgressRing(value=None, color=PRIMARY_RED, stroke_width=2),
-                ft.Text(f"Loading {title}...", size=13, color=MUTED),
-            ]),
-            ft.Row(spacing=14, controls=[
-                ft.Container(expand=1, padding=18, bgcolor=CARD_WHITE, border_radius=16, content=ft.Column(spacing=14, controls=[block(18, 180), block(12, 250), block(180)])),
-                ft.Container(expand=1, padding=18, bgcolor=CARD_WHITE, border_radius=16, content=ft.Column(spacing=14, controls=[block(18, 150), block(64), block(14), block(14)])),
-            ])
-        ])
+        return ft.Container(
+            height=112,
+            alignment=ft.Alignment.CENTER,
+            bgcolor=CARD_WHITE,
+            border=ft.Border.all(1, BORDER_COLOR),
+            border_radius=12,
+            content=ft.Row(
+                tight=True,
+                spacing=10,
+                alignment=ft.MainAxisAlignment.CENTER,
+                controls=[
+                    ft.ProgressRing(
+                        value=None,
+                        width=18,
+                        height=18,
+                        color=PRIMARY_RED,
+                        stroke_width=2,
+                    ),
+                    ft.Text(f"Loading {title}...", size=12, color=MUTED),
+                ],
+            ),
+        )
 
     def exit_admin(self):
         self.in_admin_mode = False
+        self.admin_authorized = False
         self.body_host = None
+        self.room_device_controls = {}
+        self.room_device_scan_test_armed = False
         if self.reader_monitor is not None:
             self.reader_monitor.dispose()
             self.reader_monitor = None

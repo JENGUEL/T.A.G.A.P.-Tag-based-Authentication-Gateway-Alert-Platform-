@@ -19,7 +19,7 @@ import serial
 from serial.tools import list_ports
 
 from config import settings
-from core.exceptions import RfidConnectionError, RfidReadError
+from core.exceptions import RfidConnectionError
 from services.interfaces import IRfidService
 
 logger = logging.getLogger(__name__)
@@ -129,19 +129,37 @@ class SerialRfidService(IRfidService):
     def is_connected(self) -> bool:
         return bool(self._serial and self._serial.is_open)
 
+    def is_device_present(self) -> bool:
+        configured = self._normalize_port(self._port)
+        return any(
+            self._normalize_port(port.device) == configured and port.vid is not None
+            for port in list_ports.comports()
+        )
+
     # --- Core contract ---
 
     def read_card(self, timeout_seconds: float = 1.0) -> Optional[str]:
-        if not self.is_connected():
-            raise RfidConnectionError("RFID serial port is not open")
-
-        deadline = timeout_seconds
         with self._lock:
-            self._serial.timeout = deadline
+            connection = self._serial
+            if connection is None or not connection.is_open:
+                raise RfidConnectionError("RFID serial port is not open")
+
+            connection.timeout = timeout_seconds
             try:
-                raw = self._serial.readline()
-            except serial.SerialException as exc:
-                raise RfidReadError(f"Serial read failed: {exc}") from exc
+                raw = connection.readline()
+            except (serial.SerialException, OSError) as exc:
+                self._serial = None
+                try:
+                    if connection.is_open:
+                        connection.close()
+                except (serial.SerialException, OSError) as close_error:
+                    logger.warning(
+                        "Could not close RFID serial handle after read failure: %s",
+                        close_error,
+                    )
+                raise RfidConnectionError(
+                    f"Serial read failed; the reader connection was interrupted: {exc}"
+                ) from exc
 
         if not raw:
             return None

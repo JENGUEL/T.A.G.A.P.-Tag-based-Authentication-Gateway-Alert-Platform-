@@ -163,6 +163,8 @@ def get_system_status() -> dict[str, dict[str, object]]:
             "label": "RFID reader",
             "connected": False,
             "detail": str(exc),
+            "state": "Disconnected",
+            "color": "#BA384B",
         }
 
     try:
@@ -187,6 +189,44 @@ def get_system_status() -> dict[str, dict[str, object]]:
             "label": "GSM module",
             "connected": False,
             "detail": str(exc),
+            "state": "Disconnected",
+            "color": "#BA384B",
+        }
+
+    if settings.USE_MOCK_RFID and settings.USE_MOCK_SMS:
+        status["mode"] = {
+            "label": "Operating mode",
+            "connected": True,
+            "detail": "RFID and SMS are simulated",
+            "state": "SIMULATION MODE",
+            "color": "#D9A05B",
+        }
+    elif settings.USE_MOCK_RFID or settings.USE_MOCK_SMS:
+        status["mode"] = {
+            "label": "Operating mode",
+            "connected": True,
+            "detail": (
+                f"RFID: {status['rfid']['state']}; GSM: {status['gsm']['state']}"
+            ),
+            "state": "MIXED MODE",
+            "color": "#D9A05B",
+        }
+    else:
+        missing_devices = [
+            str(status[name]["label"])
+            for name in ("rfid", "gsm")
+            if not status[name]["connected"]
+        ]
+        status["mode"] = {
+            "label": "Operating mode",
+            "connected": not missing_devices,
+            "detail": (
+                "RFID and GSM are connected"
+                if not missing_devices
+                else f"Unavailable: {', '.join(missing_devices)}"
+            ),
+            "state": "REAL HARDWARE" if not missing_devices else "DEGRADED MODE",
+            "color": "#397E68" if not missing_devices else "#D9A05B",
         }
 
     return status

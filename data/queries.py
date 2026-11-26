@@ -100,14 +100,22 @@ def get_room_info(room_id: int) -> dict[str, Any]:
         room = db.query(Room).filter_by(id=room_id).first()
         if not room:
             return {}
+        room_number = room.room_number or (
+            room.name[5:]
+            if room.name.lower().startswith("room ")
+            else room.name
+        )
         return {
             "room_id": room.id,
             "room_name": room.name,
+            "room_number": room_number,
+            "section": room.section,
             "wing": room.wing,
             "floor": room.floor,
+            "quick_actions": room.quick_actions or [],
             "school_name": room.school.name,
             "school_hotline": room.school.hotline,
-            "grade_section": "Grade 7 - Section A",  # Placeholder until we add to DB
+            "grade_section": room.section,
         }
 
 
@@ -146,7 +154,7 @@ def get_settings_snapshot(room_id: int) -> dict[str, Any]:
             "mock_rfid": settings.USE_MOCK_RFID,
             "mock_sms": settings.USE_MOCK_SMS,
             "cards": [
-                {"uid": c.uid, "type": c.type, "active": c.active}
+                {"id": c.id, "uid": c.uid, "type": c.type, "active": c.active}
                 for c in cards
             ],
             "templates": [

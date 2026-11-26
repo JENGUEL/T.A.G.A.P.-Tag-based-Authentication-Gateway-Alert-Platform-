@@ -45,6 +45,9 @@ class MockSmsService(ISmsService):
     def is_connected(self) -> bool:
         return self._open
 
+    def is_device_present(self) -> bool:
+        return True
+
     # --- Test helpers ---
 
     def fail_next(self, n: int = 1, reason: str = "injected failure") -> None:

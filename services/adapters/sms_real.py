@@ -19,6 +19,7 @@ import time
 from typing import Optional
 
 import serial
+from serial.tools import list_ports
 
 from core.exceptions import GsmConnectionError
 from services.interfaces import ISmsService, SmsResult
@@ -43,6 +44,7 @@ class Sim800SmsService(ISmsService):
     # --- Lifecycle ---
 
     def open(self) -> None:
+        self.close()
         try:
             self._serial = serial.Serial(
                 port=self._port,
@@ -54,12 +56,15 @@ class Sim800SmsService(ISmsService):
                 f"Cannot open GSM port {self._port}: {exc}"
             ) from exc
 
-        # AT handshake
-        if not self._at_ok("AT"):
-            raise GsmConnectionError("GSM module did not respond to AT")
-        if not self._at_ok("AT+CMGF=1"):
-            raise GsmConnectionError("GSM module failed to enter text mode")
-        logger.info("Sim800SmsService opened on %s", self._port)
+        try:
+            if not self._at_ok("AT"):
+                raise GsmConnectionError("GSM module did not respond to AT")
+            if not self._at_ok("AT+CMGF=1"):
+                raise GsmConnectionError("GSM module failed to enter text mode")
+            logger.info("Sim800SmsService opened on %s", self._port)
+        except Exception:
+            self.close()
+            raise
 
     def close(self) -> None:
         with self._lock:
@@ -69,6 +74,12 @@ class Sim800SmsService(ISmsService):
 
     def is_connected(self) -> bool:
         return bool(self._serial and self._serial.is_open)
+
+    def is_device_present(self) -> bool:
+        return any(
+            port.device.casefold() == self._port.casefold()
+            for port in list_ports.comports()
+        )
 
     # --- Core contract ---
 
@@ -97,6 +108,13 @@ class Sim800SmsService(ISmsService):
                     time.sleep(0.05)
             except serial.SerialException as exc:
                 logger.exception("GSM serial error")
+                connection = self._serial
+                self._serial = None
+                if connection is not None and connection.is_open:
+                    try:
+                        connection.close()
+                    except serial.SerialException:
+                        logger.exception("Could not close disconnected GSM serial port")
                 return SmsResult(
                     success=False,
                     phone_number=phone_number,

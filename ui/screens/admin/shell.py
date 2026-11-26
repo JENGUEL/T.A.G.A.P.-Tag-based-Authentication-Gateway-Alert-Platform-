@@ -17,6 +17,7 @@ def _nav_item(
         padding=ft.Padding.symmetric(horizontal=12),
         border_radius=8,
         bgcolor=ADMIN_NAV_ACTIVE_BG if is_active else "transparent",
+        data=label,
         on_click=lambda _: on_click(label),
         ink=True,
         content=ft.Row(
@@ -38,6 +39,19 @@ def _nav_item(
     )
 
 
+def set_active_admin_navigation(view: ft.View, section: str) -> None:
+    sidebar = view.controls[0].controls[0]
+    for item in sidebar.content.controls:
+        if not isinstance(item, ft.Container) or not item.data:
+            continue
+        active = item.data == section
+        item.bgcolor = ADMIN_NAV_ACTIVE_BG if active else "transparent"
+        icon, text = item.content.controls
+        icon.color = ADMIN_NAV_ACTIVE_TEXT if active else MUTED
+        text.color = ADMIN_NAV_ACTIVE_TEXT if active else INK
+        text.weight = ft.FontWeight.W_600 if active else ft.FontWeight.W_400
+
+
 def build_admin_shell(
     page: ft.Page,
     *,
@@ -48,6 +62,35 @@ def build_admin_shell(
     content: ft.Control,
 ) -> ft.View:
     """Wraps any admin content in the sidebar + top bar layout."""
+
+    nav_items: dict[str, ft.Container] = {}
+
+    def navigate(section: str):
+        for label, item in nav_items.items():
+            active = label == section
+            item.bgcolor = ADMIN_NAV_ACTIVE_BG if active else "transparent"
+            icon, text = item.content.controls
+            icon.color = ADMIN_NAV_ACTIVE_TEXT if active else MUTED
+            text.color = ADMIN_NAV_ACTIVE_TEXT if active else INK
+            text.weight = ft.FontWeight.W_600 if active else ft.FontWeight.W_400
+        page.update()
+        on_navigate(section)
+
+    nav_definitions = (
+        (ft.Icons.HOME_OUTLINED, "Room Device"),
+        (ft.Icons.DASHBOARD_OUTLINED, "Main Kiosk"),
+        (ft.Icons.WARNING_AMBER_ROUNDED, "Emergency Report"),
+        (ft.Icons.HISTORY, "Alert History"),
+        (ft.Icons.CABLE, "Reader Monitor"),
+        (ft.Icons.SETTINGS_OUTLINED, "Settings"),
+    )
+    for icon, label in nav_definitions:
+        nav_items[label] = _nav_item(
+            icon,
+            label,
+            active_page == label,
+            navigate,
+        )
 
     sidebar = ft.Container(
         width=220,
@@ -91,30 +134,7 @@ def build_admin_shell(
                 ),
                 ft.Container(height=14),
                 # Nav items
-                _nav_item(
-                    ft.Icons.HOME_OUTLINED, "Room Device",
-                    active_page == "Room Device", on_navigate,
-                ),
-                _nav_item(
-                    ft.Icons.DASHBOARD_OUTLINED, "Main Kiosk",
-                    active_page == "Main Kiosk", on_navigate,
-                ),
-                _nav_item(
-                    ft.Icons.WARNING_AMBER_ROUNDED, "Emergency Report",
-                    active_page == "Emergency Report", on_navigate,
-                ),
-                _nav_item(
-                    ft.Icons.HISTORY, "Alert History",
-                    active_page == "Alert History", on_navigate,
-                ),
-                _nav_item(
-                    ft.Icons.CABLE, "Reader Monitor",
-                    active_page == "Reader Monitor", on_navigate,
-                ),
-                _nav_item(
-                    ft.Icons.SETTINGS_OUTLINED, "Settings",
-                    active_page == "Settings", on_navigate,
-                ),
+                *nav_items.values(),
                 ft.Container(expand=True),
                 # Bottom system status
                 ft.Container(

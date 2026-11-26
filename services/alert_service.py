@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+from uuid import uuid4
 from datetime import datetime
 from typing import Optional
 
@@ -49,6 +50,25 @@ from models.sms_result_dto import AlertOutcome, AlertResult
 
 logger = logging.getLogger(__name__)
 
+_SMS_TEMPLATE_SAMPLE_CONTEXT = {
+    "room_name": "Room 201",
+    "wing": "North Wing",
+    "floor": "2nd Floor",
+    "school_name": "Sample School",
+    "school_hotline": "000",
+    "timestamp": "2026-01-01 12:00",
+}
+
+
+def validate_sms_template(template_text: str) -> None:
+    """Reject malformed or unsupported fields before a template can affect dispatch."""
+    if not template_text.strip():
+        raise ValueError("SMS templates cannot be empty.")
+    try:
+        template_text.format(**_SMS_TEMPLATE_SAMPLE_CONTEXT)
+    except (IndexError, KeyError, ValueError) as exc:
+        raise ValueError(f"Invalid SMS template field or format: {exc}") from exc
+
 
 class AlertService:
     """Stateless service — safe to instantiate per-request or as a singleton."""
@@ -58,14 +78,21 @@ class AlertService:
     # ============================================================
 
     @staticmethod
-    def scan_card(uid: str) -> AlertResult:
+    def scan_card(
+        uid: str,
+        *,
+        scan_id: str = "",
+        kiosk_room_id: Optional[int] = None,
+    ) -> AlertResult:
         scan_ts = utc_now()
+        scan_id = scan_id or uuid4().hex
 
         if not uid or not uid.strip():
             return AlertResult(
                 outcome=AlertOutcome.ERROR,
                 error_message="Empty UID",
                 scan_ts=scan_ts,
+                scan_id=scan_id,
             )
 
         uid = uid.strip()
@@ -79,15 +106,25 @@ class AlertService:
                 card_uid=uid,
                 error_message=f"DB error: {exc}",
                 scan_ts=scan_ts,
+                scan_id=scan_id,
             )
 
         if card is None:
             logger.warning("Unknown card scanned: %s", uid)
-            _audit(EVENT_CARD_SCANNED, {"uid": uid, "result": "unknown"})
+            _audit(
+                EVENT_CARD_SCANNED,
+                {
+                    "uid": uid,
+                    "result": "unknown",
+                    "room_id": kiosk_room_id,
+                    "scan_id": scan_id,
+                },
+            )
             return AlertResult(
                 outcome=AlertOutcome.REJECTED_UNKNOWN,
                 card_uid=uid,
                 scan_ts=scan_ts,
+                scan_id=scan_id,
             )
 
         card_type = card.card_type
@@ -96,7 +133,10 @@ class AlertService:
 
         if card_type == CardType.ADMIN:
             logger.info("Admin card scanned: %s", uid)
-            _audit(EVENT_ADMIN_ACCESS, {"uid": uid})
+            _audit(
+                EVENT_ADMIN_ACCESS,
+                {"uid": uid, "room_id": room.id, "scan_id": scan_id},
+            )
             return AlertResult(
                 outcome=AlertOutcome.ADMIN_ACCESS,
                 card_uid=uid,
@@ -105,6 +145,7 @@ class AlertService:
                 room_name=room.name,
                 school_name=school.name,
                 scan_ts=scan_ts,
+                scan_id=scan_id,
             )
 
         try:
@@ -119,11 +160,20 @@ class AlertService:
                 card_uid=uid,
                 error_message=f"DB error: {exc}",
                 scan_ts=scan_ts,
+                scan_id=scan_id,
             )
 
         if is_dup:
             logger.info("Duplicate scan rejected: %s", uid)
-            _audit(EVENT_CARD_REJECTED_DUPLICATE, {"uid": uid})
+            _audit(
+                EVENT_CARD_REJECTED_DUPLICATE,
+                {
+                    "uid": uid,
+                    "room_id": room.id,
+                    "card_type": card_type.value,
+                    "scan_id": scan_id,
+                },
+            )
             return AlertResult(
                 outcome=AlertOutcome.REJECTED_DUPLICATE,
                 card_uid=uid,
@@ -131,9 +181,19 @@ class AlertService:
                 room_id=room.id,
                 room_name=room.name,
                 scan_ts=scan_ts,
+                scan_id=scan_id,
             )
 
-        _audit(EVENT_CARD_SCANNED, {"uid": uid, "result": "needs_confirmation"})
+        _audit(
+            EVENT_CARD_SCANNED,
+            {
+                "uid": uid,
+                "result": "needs_confirmation",
+                "room_id": room.id,
+                "card_type": card_type.value,
+                "scan_id": scan_id,
+            },
+        )
         logger.info("Card %s (%s) → needs confirmation", uid, card_type.value)
         return AlertResult(
             outcome=AlertOutcome.NEEDS_CONFIRMATION,
@@ -145,7 +205,12 @@ class AlertService:
             school_name=school.name,
             school_hotline=school.hotline,
             scan_ts=scan_ts,
+            scan_id=scan_id,
         )
+
+    @staticmethod
+    def record_operational_event(event_type: str, payload: dict[str, object]) -> None:
+        _audit(event_type, payload)
 
     # ============================================================
     # Phase 2: Execute alert (transactional, writes)
@@ -157,9 +222,9 @@ class AlertService:
         scan_ts: datetime,
         *,
         confirmed_at: Optional[datetime] = None,
+        scan_id: str = "",
     ) -> AlertResult:
         confirmed_at = confirmed_at or utc_now()
-        queued_at = utc_now()
 
         try:
             card = CardRepository.get_by_uid(uid)
@@ -169,12 +234,14 @@ class AlertService:
                 outcome=AlertOutcome.ERROR,
                 card_uid=uid,
                 error_message=f"DB error: {exc}",
+                scan_id=scan_id,
             )
 
         if card is None:
             return AlertResult(
                 outcome=AlertOutcome.REJECTED_UNKNOWN,
                 card_uid=uid,
+                scan_id=scan_id,
             )
 
         card_type = card.card_type
@@ -192,6 +259,7 @@ class AlertService:
                         card_uid=uid,
                         card_type=card_type,
                         room_id=room.id,
+                        scan_id=scan_id,
                     )
 
                 alert = AlertRepository.create(
@@ -246,6 +314,7 @@ class AlertService:
                     )
                     queued += 1
 
+                queued_at = utc_now()
                 AnalyticsRepository.create(
                     db,
                     alert_id=alert.id,
@@ -259,8 +328,10 @@ class AlertService:
                     event_type=EVENT_ALERT_QUEUED,
                     payload_json=json.dumps({
                         "alert_id": alert.id,
+                        "room_id": room.id,
                         "card_uid": uid,
                         "card_type": card_type.value,
+                        "scan_id": scan_id,
                         "parents": len(parents),
                         "police": len(police_stations),
                         "sms_queued": queued,
@@ -285,6 +356,7 @@ class AlertService:
                 alert_id=alert_id,
                 sms_queued=queued,
                 scan_ts=scan_ts,
+                scan_id=scan_id,
             )
 
         except Exception as exc:
@@ -294,6 +366,7 @@ class AlertService:
                 card_uid=uid,
                 card_type=card_type,
                 room_id=room.id,
+                scan_id=scan_id,
                 error_message=str(exc),
             )
 
@@ -414,6 +487,7 @@ class AlertService:
                     event_type=EVENT_ALERT_QUEUED,
                     payload_json=json.dumps({
                         "alert_id": alert.id,
+                        "room_id": room.id,
                         "source": "MANUAL",
                         "admin_uid": admin_uid,
                         "card_type": card_type.value,
@@ -463,6 +537,7 @@ class AlertService:
         Returns True on success.
         """
         try:
+            validate_sms_template(new_text)
             with get_db() as db:
                 SmsTemplateRepository.upsert(db, card_type, recipient_type, new_text)
             logger.info("Template updated: %s/%s", card_type.value, recipient_type)

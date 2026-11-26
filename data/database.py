@@ -11,7 +11,7 @@ import logging
 from contextlib import contextmanager
 from typing import Generator
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -110,7 +110,37 @@ def init_db() -> None:
     import models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
+    _ensure_room_schema(engine)
     logger.info("Database schema initialized at %s", settings.db_path)
+
+
+def _ensure_room_schema(database_engine: Engine) -> None:
+    """Add Room Device fields to databases created by earlier TAGAP versions."""
+    room_columns = {
+        column["name"] for column in inspect(database_engine).get_columns("rooms")
+    }
+    new_columns = (
+        ("room_number", "VARCHAR(20) NOT NULL DEFAULT ''"),
+        ("section", "VARCHAR(100) NOT NULL DEFAULT ''"),
+        ("quick_actions", "JSON NOT NULL DEFAULT '[]'"),
+    )
+    missing_columns = [
+        (name, definition)
+        for name, definition in new_columns
+        if name not in room_columns
+    ]
+    if not missing_columns:
+        return
+
+    with database_engine.begin() as connection:
+        for name, definition in missing_columns:
+            connection.exec_driver_sql(
+                f"ALTER TABLE rooms ADD COLUMN {name} {definition}"
+            )
+    logger.info(
+        "Room Device schema updated with columns: %s",
+        ", ".join(name for name, _ in missing_columns),
+    )
 
 
 def drop_db() -> None:

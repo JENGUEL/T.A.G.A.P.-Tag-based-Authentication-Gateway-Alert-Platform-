@@ -35,29 +35,22 @@ def _placeholder(section: str, navigate) -> ft.Control:
 
 
 def _section_skeleton(section: str, compact: bool) -> ft.Control:
-    def block(height: int, width: int | None = None, expand: bool = False):
-        return ft.Container(height=height, width=width, expand=expand or None, bgcolor="#EEE9EB", border_radius=8)
-
-    summary_card = ft.Container(expand=True if not compact else None, padding=18, bgcolor="#FFFFFF",
-                                border=ft.Border.all(1, "#ECE8EA"), border_radius=16,
-                                content=ft.Column(spacing=14, controls=[block(18, 180), block(12, 250),
-                                                                        block(120 if compact else 180),
-                                                                        ft.Row(spacing=10, controls=[block(30, 110),
-                                                                                                     block(30, 110)])]))
-    side_card = ft.Container(expand=True if not compact else None, padding=18, bgcolor="#FFFFFF",
-                             border=ft.Border.all(1, "#ECE8EA"), border_radius=16,
-                             content=ft.Column(spacing=14,
-                                               controls=[block(18, 150), block(64), block(14), block(14), block(14)]))
-
-    cards = ft.Column(spacing=14, controls=[summary_card, side_card]) if compact else ft.Row(expand=True, spacing=14,
-                                                                                             vertical_alignment=ft.CrossAxisAlignment.STRETCH,
-                                                                                             controls=[summary_card,
-                                                                                                       side_card])
-    return ft.Column(expand=True, spacing=16, controls=[
-        ft.Row(tight=True, spacing=10, controls=[ft.ProgressRing(value=None, color=PRIMARY, stroke_width=2),
-                                                 ft.Text(f"Loading {section}…", size=13, color=MUTED)]),
-        cards,
-    ])
+    return ft.Container(
+        height=112,
+        alignment=ft.Alignment.CENTER,
+        bgcolor="#FFFFFF",
+        border=ft.Border.all(1, "#ECE8EA"),
+        border_radius=12,
+        content=ft.Row(
+            tight=True,
+            spacing=10,
+            alignment=ft.MainAxisAlignment.CENTER,
+            controls=[
+                ft.ProgressRing(value=None, width=18, height=18, color=PRIMARY, stroke_width=2),
+                ft.Text(f"Loading {section}…", size=12, color=MUTED),
+            ],
+        ),
+    )
 
 
 def show_admin_panel(page: ft.Page, on_exit_to_kiosk):
