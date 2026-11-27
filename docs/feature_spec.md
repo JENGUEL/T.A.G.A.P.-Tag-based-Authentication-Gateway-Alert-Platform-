@@ -125,6 +125,7 @@ analytics (id, alert_id, response_time_ms, scan_ts, confirm_ts, queue_ts, sent_t
 ### 7.1 Access
 
 - **Scan Admin card** → smooth transition to Settings view. No PIN required to *view*.
+- **Scan the active Admin card again** from an admin screen → return to kiosk standby.
 - **4-digit PIN** required for all destructive actions.
 
 ### 7.2 View (no PIN)

@@ -1780,6 +1780,31 @@ class AppRouter:
                     self.page.update()
             return
 
+        if self.in_admin_mode:
+            try:
+                is_admin = CardRepository.is_active_admin_uid(
+                    self.room_id or 1,
+                    uid.strip(),
+                )
+            except Exception:
+                AudioService.error()
+                logger.exception("Could not verify admin card for kiosk return")
+                Toast.show(self.page, "Could not verify admin card.", "error")
+                return
+
+            if is_admin:
+                if self.card_registration_session is not None:
+                    self._cancel_card_registration()
+                else:
+                    page = getattr(self, "page", None)
+                    if (
+                        page is not None
+                        and getattr(page, "dialog", None) is not None
+                    ):
+                        page.pop_dialog()
+                self.exit_admin()
+                return
+
         if self.card_registration_session is not None:
             self._handle_card_registration_scan(uid)
             return
@@ -1933,8 +1958,8 @@ class AppRouter:
         self.page.views.clear()
         self.page.views.append(view)
         self.page.update()
-        if section in ("Room Device", "Settings"):
-            self.page.run_task(self._start_room_device_listener)
+        if section != "Reader Monitor":
+            self.page.run_task(self._start_admin_rfid_listener)
 
     @staticmethod
     def _admin_body_host(view: ft.View) -> Optional[ft.Container]:
@@ -1943,11 +1968,10 @@ class AppRouter:
         except (AttributeError, IndexError):
             return None
 
-    async def _start_room_device_listener(self):
+    async def _start_admin_rfid_listener(self):
         await asyncio.sleep(0.6)
         if (
             self.in_admin_mode
-            and self.current_admin_section in ("Room Device", "Settings")
             and self.reader_monitor is None
             and not self.rfid_listener.is_running
         ):
@@ -2174,7 +2198,14 @@ class AppRouter:
             rfid = get_rfid_service()
             rfid.close()
             self.reader_connected = rfid.is_connected()
-            self.reader_monitor = ReaderMonitor(self.page)
+            self.reader_monitor = ReaderMonitor(
+                self.page,
+                is_admin_card_uid=lambda uid: CardRepository.is_active_admin_uid(
+                    self.room_id or 1,
+                    uid,
+                ),
+                on_admin_card_scanned=self.exit_admin,
+            )
             return self.reader_monitor.build(
                 self.room_id or 1, self._navigate_admin, self.exit_admin,
             )
@@ -2245,7 +2276,7 @@ class AppRouter:
         if section == self.current_admin_section:
             return
 
-        if section not in ("Room Device", "Settings"):
+        if section == "Reader Monitor":
             self.rfid_listener.stop()
             self.room_device_scan_test_armed = False
 
@@ -2293,8 +2324,8 @@ class AppRouter:
         await asyncio.sleep(0.1)
         self.body_host.opacity = 1
         self.page.update()
-        if section in ("Room Device", "Settings"):
-            self.page.run_task(self._start_room_device_listener)
+        if section != "Reader Monitor":
+            self.page.run_task(self._start_admin_rfid_listener)
 
     def _build_skeleton(self, title: str) -> ft.Control:
         return ft.Container(
@@ -2329,5 +2360,6 @@ class AppRouter:
         if self.reader_monitor is not None:
             self.reader_monitor.dispose()
             self.reader_monitor = None
-        self.rfid_listener.start()
+        if not self.rfid_listener.is_running:
+            self.rfid_listener.start()
         self.show_standby()

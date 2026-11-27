@@ -10,9 +10,13 @@ from ui.theme import ADMIN_NAV_ACTIVE_BG
 class FakePage:
     def __init__(self):
         self.views = []
+        self.tasks = []
 
     def update(self):
         return None
+
+    def run_task(self, handler, *args):
+        self.tasks.append((handler, args))
 
 
 def test_sidebar_active_state_moves_when_navigation_item_is_clicked():
@@ -77,6 +81,7 @@ def test_admin_navigation_preserves_shell_and_replaces_only_right_content():
     assert router.body_host is original_body
     assert original_body.content is next_body.content
     assert router.current_admin_section == "Alert History"
+    assert page.tasks == [(router._start_admin_rfid_listener, ())]
     active_item = next(
         item
         for item in old_view.controls[0].controls[0].content.controls

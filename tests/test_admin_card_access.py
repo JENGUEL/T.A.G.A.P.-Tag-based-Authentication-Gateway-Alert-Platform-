@@ -121,6 +121,11 @@ def test_card_enrollment_requires_confirmation_and_a_matching_second_scan(
         lambda *args: saved.append(args),
     )
     monkeypatch.setattr(
+        router_module.CardRepository,
+        "is_active_admin_uid",
+        lambda *_args: False,
+    )
+    monkeypatch.setattr(
         router_module.CardCategoryRepository,
         "get_active",
         lambda: ["ONGOING", "END"],
@@ -154,3 +159,97 @@ def test_card_enrollment_requires_confirmation_and_a_matching_second_scan(
     assert refreshed == ["Settings"]
     assert router.page.pop_dialog_calls == 1
     assert audio_calls == {"beep": 3, "error": 1}
+
+
+def test_scanning_active_admin_card_exits_admin_to_kiosk(monkeypatch, audio_calls):
+    router = object.__new__(router_module.AppRouter)
+    router.page = FakePage()
+    router.page.dialog = object()
+    router.current_alert = None
+    router.in_admin_mode = True
+    router.room_id = 1
+    router.reader_monitor_auth_pending = False
+    router.card_registration_session = None
+    exited = []
+    router.exit_admin = lambda: exited.append(True)
+    monkeypatch.setattr(
+        router_module.CardRepository,
+        "is_active_admin_uid",
+        lambda room_id, uid: room_id == 1 and uid == "ADMIN-UID",
+    )
+    monkeypatch.setattr(
+        router_module.AlertService,
+        "record_operational_event",
+        lambda *_args, **_kwargs: None,
+    )
+
+    router.handle_card_scan("ADMIN-UID")
+
+    assert exited == [True]
+    assert router.page.pop_dialog_calls == 1
+    assert audio_calls == {"beep": 1, "error": 0}
+
+
+def test_admin_card_exit_cancels_pending_card_registration(monkeypatch):
+    router = object.__new__(router_module.AppRouter)
+    router.current_alert = None
+    router.in_admin_mode = True
+    router.room_id = 1
+    router.reader_monitor_auth_pending = False
+    router.card_registration_session = {"stage": "scan_first"}
+    actions = []
+    router._cancel_card_registration = lambda: actions.append("cancel")
+    router.exit_admin = lambda: actions.append("exit")
+    monkeypatch.setattr(
+        router_module.CardRepository,
+        "is_active_admin_uid",
+        lambda *_args: True,
+    )
+    monkeypatch.setattr(
+        router_module.AlertService,
+        "record_operational_event",
+        lambda *_args, **_kwargs: None,
+    )
+
+    router.handle_card_scan("ADMIN-UID")
+
+    assert actions == ["cancel", "exit"]
+
+
+def test_admin_rfid_listener_starts_on_admin_views():
+    router = object.__new__(router_module.AppRouter)
+    router.in_admin_mode = True
+    router.reader_monitor = None
+
+    class FakeListener:
+        is_running = False
+
+        def start(self):
+            self.is_running = True
+
+    router.rfid_listener = FakeListener()
+
+    asyncio.run(router._start_admin_rfid_listener())
+
+    assert router.rfid_listener.is_running is True
+
+
+def test_exit_admin_does_not_start_a_second_active_listener():
+    router = object.__new__(router_module.AppRouter)
+    router.in_admin_mode = True
+    router.admin_authorized = True
+    router.body_host = object()
+    router.room_device_controls = {}
+    router.room_device_scan_test_armed = False
+    router.reader_monitor = None
+    router.rfid_listener = type(
+        "ActiveListener",
+        (),
+        {"is_running": True, "start": lambda _self: pytest.fail("duplicate listener")},
+    )()
+    shown = []
+    router.show_standby = lambda: shown.append(True)
+
+    router.exit_admin()
+
+    assert shown == [True]

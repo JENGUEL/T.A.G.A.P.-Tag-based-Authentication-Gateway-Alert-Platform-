@@ -21,8 +21,16 @@ logger = logging.getLogger(__name__)
 
 
 class ReaderMonitor:
-    def __init__(self, page: ft.Page) -> None:
+    def __init__(
+        self,
+        page: ft.Page,
+        *,
+        is_admin_card_uid: Optional[Callable[[str], bool]] = None,
+        on_admin_card_scanned: Optional[Callable[[], None]] = None,
+    ) -> None:
         self.page = page
+        self._is_admin_card_uid = is_admin_card_uid
+        self._on_admin_card_scanned = on_admin_card_scanned
         self._serial: Optional[serial.Serial] = None
         self._read_task: Optional[Future[None]] = None
         self._handshake_event: Optional[asyncio.Event] = None
@@ -346,7 +354,29 @@ class ReaderMonitor:
                     self.status_text.value = "RC522 not responding"
                     self.status_text.color = "#F28B82"
                 elif uid.startswith("UID:"):
-                    self._append_line(f"UID > {uid[4:]}", "#81C995")
+                    card_uid = uid[4:].strip()
+                    if self._is_admin_card_uid is not None:
+                        try:
+                            is_admin = self._is_admin_card_uid(card_uid)
+                        except Exception:
+                            logger.exception("Could not verify admin card in Reader Monitor")
+                            self._append_line(
+                                "ERROR: Could not verify whether this is an active ADMIN card.",
+                                "#F28B82",
+                            )
+                            self.page.update()
+                            continue
+                        if is_admin and self._on_admin_card_scanned is not None:
+                            self._append_line(
+                                "ADMIN CARD detected · returning to kiosk.",
+                                "#F6C177",
+                            )
+                            self.page.update()
+                            asyncio.get_running_loop().call_soon(
+                                self._on_admin_card_scanned
+                            )
+                            return
+                    self._append_line(f"UID > {card_uid}", "#81C995")
                 else:
                     self._append_line(f"SERIAL > {uid}", "#AAB4BE")
                 self.page.update()

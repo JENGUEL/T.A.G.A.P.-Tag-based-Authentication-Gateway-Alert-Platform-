@@ -31,6 +31,11 @@ def test_room_device_admin_scan_updates_live_status_without_alerting(
         "scan_card",
         lambda _: pytest.fail("Room Device scans must not create alert requests"),
     )
+    monkeypatch.setattr(
+        router_module.CardRepository,
+        "is_active_admin_uid",
+        lambda *_args: False,
+    )
 
     router.handle_card_scan("A1B2C3D4")
 
@@ -53,6 +58,11 @@ def test_admin_scans_outside_room_device_are_not_processed(monkeypatch, beep_cal
         router_module.AlertService,
         "scan_card",
         lambda _: pytest.fail("Admin scans must not trigger alerts"),
+    )
+    monkeypatch.setattr(
+        router_module.CardRepository,
+        "is_active_admin_uid",
+        lambda *_args: False,
     )
 
     router.handle_card_scan("A1B2C3D4")
